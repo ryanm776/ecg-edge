@@ -35,6 +35,10 @@ Local Python environment: `requirements.txt` pins exact versions (TensorFlow 2.2
 - `loop()` currently feeds hardcoded dummy sensor data (`dummy_rr_features`, constant `0.5f` spectrogram) — real sensor acquisition/preprocessing to match the notebook's filtering + STFT pipeline is not yet implemented on-device.
 - Alert threshold (`probability > 0.30f`) mirrors the notebook's threshold-sweep conclusion; see note above.
 
+## Deployment constraints
+
+- The deployed firmware will detect R-peaks itself using Pan-Tompkins, not ground-truth annotations. Feature extraction should accept R-peak locations from any source (annotation-derived or detector-derived), so the model can later be evaluated using Pan-Tompkins detections on MIT-BIH instead of the expert annotations — not yet implemented.
+
 ## Git history note
 
 An earlier QAT (quantization-aware training) pipeline and its model output were removed in favor of the current PTQ (post-training quantization) approach (see commit `7e74dbb`). Don't reintroduce QAT scaffolding unless that decision is being deliberately revisited.
