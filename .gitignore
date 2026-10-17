@@ -1,0 +1,14 @@
+﻿# Python environment & caches
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Training logs
+logs/
+
+# Editor settings
+.vscode/
+
+# Downloaded datasets
+data/
