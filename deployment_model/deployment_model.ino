@@ -7,6 +7,7 @@
 #include <algorithm> // For std::clamp and std::min
 #include <cmath>     // For roundf
 #include "model_data.h"
+#include "threshold.h"
 
 // Explicit forward declaration for g_model array
 extern const unsigned char g_model[];
@@ -128,7 +129,7 @@ void loop() {
 
     Serial.printf("Latency: %.2f ms | Abnormal Beat Probability: %.4f\n", latency_us / 1000.0f, probability);
 
-    if (probability > 0.30f) {
+    if (probability > kAbnormalThreshold) {
         Serial.println("ALERT: Abnormal Beat Detected!");
         digitalWrite(LED_BUILTIN, HIGH); 
     } else {
