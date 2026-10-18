@@ -52,6 +52,26 @@ def _tensor_detail_by_name(details, name):
     raise KeyError(f"No tensor with name containing {name!r} found among {[d['name'] for d in details]}")
 
 
+def _bind_inputs(input_details, n_rr_features=5):
+    """Return (spec_detail, rr_detail). Binds by name substring when the names survived
+    conversion (PTQ models); otherwise falls back to element count, the same rule the
+    firmware uses (QAT models' inputs are named after tfmot's quantize_layer, not the
+    Keras inputs).
+    """
+    try:
+        return (
+            _tensor_detail_by_name(input_details, "spectrogram_input"),
+            _tensor_detail_by_name(input_details, "rr_input"),
+        )
+    except KeyError:
+        pass
+    rr = [d for d in input_details if int(np.prod(d["shape"])) == n_rr_features]
+    spec = [d for d in input_details if int(np.prod(d["shape"])) != n_rr_features]
+    if len(input_details) != 2 or len(rr) != 1 or len(spec) != 1:
+        raise KeyError(f"Can't bind spectrogram/R-R inputs among {[(d['name'], d['shape']) for d in input_details]}")
+    return spec[0], rr[0]
+
+
 def predict_tflite(tflite_path, X_spec, X_rr):
     """Run the INT8 .tflite model over a dataset, returning dequantized probabilities."""
     interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
@@ -60,8 +80,7 @@ def predict_tflite(tflite_path, X_spec, X_rr):
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
-    spec_detail = _tensor_detail_by_name(input_details, "spectrogram_input")
-    rr_detail = _tensor_detail_by_name(input_details, "rr_input")
+    spec_detail, rr_detail = _bind_inputs(input_details)
     out_detail = output_details[0]
 
     spec_scale, spec_zp = spec_detail["quantization"]

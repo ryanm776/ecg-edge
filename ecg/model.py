@@ -45,6 +45,10 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
     of surviving as a standalone INT8 MUL/ADD that amplifies a tensor quantized to only
     a handful of levels (see artifacts/diagnosis.md). This is also the Conv+BN+ReLU
     pattern tfmot's QAT folds. `keras_mod` lets the QAT path build it with tf_keras.
+
+    ReLU6 is always a separate `ReLU(max_value=6)` layer, never `activation="relu6"`:
+    tfmot's QuantizeAwareActivation rejects relu6 as a built-in layer activation. The
+    converter still fuses it into the preceding CONV_2D / FULLY_CONNECTED op.
     """
     layers = keras_mod.layers
 
@@ -67,11 +71,11 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
 
     # 5-Feature R-R Timing Branch
     rr_input = layers.Input(shape=(5,), name="rr_input")
-    y = layers.Dense(8, activation="relu6")(rr_input)
+    y = layers.ReLU(max_value=6.0)(layers.Dense(8)(rr_input))
 
     # Dense Fusion Network
     combined = layers.concatenate([x, y])
-    z = layers.Dense(64, activation="relu6", kernel_regularizer="l2")(combined)
+    z = layers.ReLU(max_value=6.0)(layers.Dense(64, kernel_regularizer="l2")(combined))
     z = layers.Dropout(0.40)(z)
     output = layers.Dense(1, activation="sigmoid", name="output")(z)
 

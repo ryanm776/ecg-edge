@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from ecg.evaluate import evaluate_predictions, select_threshold
+from ecg.evaluate import _bind_inputs, evaluate_predictions, select_threshold
 
 
 def _separated_classes(seed, n_per_class=30):
@@ -69,3 +70,26 @@ def test_evaluate_predictions_per_record_handles_zero_abnormal():
     assert mixed_row["n_abnormal"] == 2
     assert mixed_row["precision"] == 1.0
     assert mixed_row["recall"] == 1.0
+
+
+def _detail(name, shape):
+    return {"name": name, "shape": np.array(shape)}
+
+
+def test_bind_inputs_by_name_when_names_survive_conversion():
+    details = [_detail("serving_default_rr_input:0", [1, 5]), _detail("serving_default_spectrogram_input:0", [1, 33, 12, 1])]
+    spec, rr = _bind_inputs(details)
+    assert "spectrogram_input" in spec["name"] and "rr_input" in rr["name"]
+
+
+def test_bind_inputs_falls_back_to_element_count():
+    # QAT models' inputs are named after tfmot's quantize_layer, not the Keras inputs.
+    details = [_detail("model/quantize_layer_1/FakeQuant", [1, 5]), _detail("model/quantize_layer/FakeQuant", [1, 33, 12, 1])]
+    spec, rr = _bind_inputs(details)
+    assert list(rr["shape"]) == [1, 5] and list(spec["shape"]) == [1, 33, 12, 1]
+
+
+def test_bind_inputs_rejects_ambiguous_shapes():
+    details = [_detail("a", [1, 33, 12, 1]), _detail("b", [1, 33, 12, 1])]
+    with pytest.raises(KeyError):
+        _bind_inputs(details)
