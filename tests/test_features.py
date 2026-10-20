@@ -1,7 +1,12 @@
 import numpy as np
 import scipy.signal as signal
 
-from ecg.features import compute_rr_timing_features, compute_spectrogram
+from ecg.features import (
+    apply_rr_normalizer,
+    compute_rr_timing_features,
+    compute_spectrogram,
+    fit_rr_normalizer,
+)
 
 
 def test_compute_spectrogram_shape_matches_scipy_and_is_normalized():
@@ -45,3 +50,29 @@ def test_compute_rr_timing_features_respects_lookback_window():
     _, _, local_mean_rr, _, _ = compute_rr_timing_features(rr_intervals, i=5, lookback=2)
 
     assert local_mean_rr == np.mean(rr_intervals[3:5])
+
+
+def test_rr_normalizer_standardizes_train_and_reuses_train_stats():
+    rng = np.random.default_rng(0)
+    X_train = rng.uniform(0.2, 2.0, size=(200, 5))
+    X_other = rng.uniform(0.2, 2.0, size=(50, 5))
+
+    mean, std = fit_rr_normalizer(X_train)
+    Z_train = apply_rr_normalizer(X_train, mean, std)
+
+    assert Z_train.dtype == np.float32
+    np.testing.assert_allclose(Z_train.mean(axis=0), 0.0, atol=1e-5)
+    np.testing.assert_allclose(Z_train.std(axis=0), 1.0, atol=1e-5)
+    # Other splits use the train stats, and the transform inverts exactly.
+    np.testing.assert_allclose(apply_rr_normalizer(X_other, mean, std) * std + mean, X_other, rtol=1e-5)
+
+
+def test_rr_normalizer_constant_feature_does_not_divide_by_zero():
+    X = np.column_stack([np.full(10, 0.8), np.linspace(0.5, 1.5, 10)])
+
+    mean, std = fit_rr_normalizer(X)
+    Z = apply_rr_normalizer(X, mean, std)
+
+    assert std[0] == 1.0
+    assert np.all(np.isfinite(Z))
+    np.testing.assert_allclose(Z[:, 0], 0.0, atol=1e-6)

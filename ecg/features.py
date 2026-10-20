@@ -43,6 +43,19 @@ def compute_rr_timing_features(rr_intervals, i, lookback=10):
     return [pre_rr, post_rr, local_mean_rr, rr_ratio, pre_post_ratio]
 
 
+def fit_rr_normalizer(X_rr):
+    """Per-feature mean/std of the R-R features. Fit on the training set only."""
+    X_rr = np.asarray(X_rr, dtype=np.float64)
+    mean = X_rr.mean(axis=0)
+    std = X_rr.std(axis=0)
+    std[std < 1e-12] = 1.0  # a constant feature passes through centered, not divided by ~zero
+    return mean, std
+
+
+def apply_rr_normalizer(X_rr, mean, std):
+    return ((np.asarray(X_rr) - mean) / std).astype(np.float32)
+
+
 def extract_beats_from_record(
     filtered_signal,
     fs,

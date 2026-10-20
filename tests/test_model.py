@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 
+from ecg.evaluate import min_int8_levels
 from ecg.export import convert_to_int8_tflite
 from ecg.model import build_multiscale_bn_folded_model, build_multiscale_ptq_model
 
@@ -51,3 +52,17 @@ def test_bn_folded_int8_conversion_has_no_standalone_batchnorm_ops():
     ops = _op_names(convert_to_int8_tflite(model, X_spec, X_rr, num_samples=20, seed=0))
     assert "MUL" not in ops
     assert "ADD" not in ops
+
+
+def test_min_int8_levels_reports_an_op_output_tensor(tmp_path):
+    X_spec, X_rr = _random_data(20)
+    model = build_multiscale_bn_folded_model(SPEC_SHAPE)
+    path = tmp_path / "model.tflite"
+    path.write_bytes(convert_to_int8_tflite(model, X_spec, X_rr, num_samples=20, seed=0))
+
+    levels, name = min_int8_levels(path, X_spec[:5], X_rr[:5])
+
+    assert 0 <= levels <= 255
+    interpreter = tf.lite.Interpreter(model_path=str(path))
+    input_names = {d["name"] for d in interpreter.get_input_details()}
+    assert name not in input_names  # model inputs aren't op outputs

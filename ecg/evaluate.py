@@ -103,6 +103,40 @@ def predict_tflite(tflite_path, X_spec, X_rr):
     return probs
 
 
+def min_int8_levels(tflite_path, X_spec, X_rr):
+    """Smallest number of INT8 levels any op-output tensor actually spans over the given
+    beats (observed max - min of its int8 values), and that tensor's name. This is the
+    diagnostic from artifacts/diagnosis.md: the baseline's pre-BN tensors span ~4-5.
+    """
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_path), experimental_preserve_all_tensors=True)
+    interpreter.allocate_tensors()
+
+    spec_detail, rr_detail = _bind_inputs(interpreter.get_input_details())
+    spec_scale, spec_zp = spec_detail["quantization"]
+    rr_scale, rr_zp = rr_detail["quantization"]
+
+    tensor_names = {d["index"]: d["name"] for d in interpreter.get_tensor_details()}
+    tensor_dtypes = {d["index"]: d["dtype"] for d in interpreter.get_tensor_details()}
+    op_outputs = sorted({
+        i for op in interpreter._get_ops_details() for i in op["outputs"]
+        if i >= 0 and tensor_dtypes[i] == np.int8
+    })
+
+    lo = {i: 127 for i in op_outputs}
+    hi = {i: -128 for i in op_outputs}
+    for n in range(len(X_spec)):
+        interpreter.set_tensor(spec_detail["index"], quantize_value(X_spec[n:n + 1], spec_scale, spec_zp))
+        interpreter.set_tensor(rr_detail["index"], quantize_value(X_rr[n:n + 1], rr_scale, rr_zp))
+        interpreter.invoke()
+        for i in op_outputs:
+            t = interpreter.get_tensor(i)
+            lo[i] = min(lo[i], int(t.min()))
+            hi[i] = max(hi[i], int(t.max()))
+
+    worst = min(op_outputs, key=lambda i: hi[i] - lo[i])
+    return hi[worst] - lo[worst], tensor_names[worst]
+
+
 def evaluate_predictions(y_true, probs, record_ids, threshold):
     """Overall + per-record metrics for the Abnormal class at a fixed threshold.
 

@@ -24,8 +24,20 @@ decision threshold from the **INT8 model's** validation predictions, and evaluat
 float and INT8 models on the full test set.
 
 Useful flags: `--epochs`, `--batch-size`, `--threshold-strategy {f1,recall_at_precision}`,
-`--min-precision` (for `recall_at_precision`), `--seed`. Run `python scripts/train.py --help`
-for the full list.
+`--min-precision` (for `recall_at_precision`), `--seed`, `--variant {baseline,bn_folded,qat}`,
+`--calib-samples` (PTQ calibration-set size, default 100), `--normalize-rr`,
+`--no-firmware-export`. Run `python scripts/train.py --help` for the full list.
+
+To compare variants (float vs. INT8, each in its own process, never touching
+`deployment_model/`):
+
+```bash
+python scripts/compare_variants.py                          # baseline, bn_folded, qat
+python scripts/compare_variants.py --variants bn_folded --calib-samples 100 500 1000 5000
+```
+
+Each run writes to `artifacts/variants/<run>/`; all runs are aggregated into
+`artifacts/variant_comparison.{csv,md}`.
 
 ### Outputs
 

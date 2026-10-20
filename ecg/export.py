@@ -61,6 +61,21 @@ def write_c_header(tflite_bytes, path, array_name="g_model"):
         f.write(f"\n}};\n\n#endif  // {guard}\n")
 
 
+def write_rr_norm_header(mean, std, path):
+    """Write the R-R normalizer stats as C++ constexpr arrays; the firmware applies
+    (x - kRrMean[i]) / kRrStd[i] before quantizing the R-R input."""
+    guard = "RR_NORM_H_"
+
+    def fmt(values):
+        return ", ".join(f"{float(v):.6f}f" for v in values)
+
+    with open(path, "w") as f:
+        f.write(f"#ifndef {guard}\n#define {guard}\n\n")
+        f.write(f"constexpr float kRrMean[{len(mean)}] = {{{fmt(mean)}}};\n")
+        f.write(f"constexpr float kRrStd[{len(std)}] = {{{fmt(std)}}};\n\n")
+        f.write(f"#endif  // {guard}\n")
+
+
 def write_threshold_header(threshold, path, const_name="kAbnormalThreshold"):
     """Write the decision threshold as a C++ constexpr, so firmware stays in sync with training."""
     guard = f"{const_name.upper()}_H_"
