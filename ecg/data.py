@@ -34,16 +34,18 @@ def load_record(record_id, data_dir):
     return record, annotation
 
 
-def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None):
+def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
+                  return_symbols=False):
     """Load, filter, and feature-extract every usable beat across `record_list`.
 
     Returns (X_spec, X_rr, y, record_ids) as arrays, all aligned beat-for-beat.
     `record_ids` is new relative to the original notebook -- needed for per-record metrics.
+    `return_symbols=True` appends each beat's annotation symbol as a fifth array.
     """
     ensure_mitdb_cached(data_dir, record_list)
     rng = np.random.default_rng(seed)
 
-    spec_list, rr_list, y_list, record_id_list = [], [], [], []
+    spec_list, rr_list, y_list, record_id_list, symbol_list = [], [], [], [], []
 
     for rec in record_list:
         try:
@@ -54,7 +56,7 @@ def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=Fal
         fs = record.fs
         filtered = features.bandpass_filter(record.p_signal[:, 0], fs)
 
-        specs, rrs, ys, rec_ids = features.extract_beats_from_record(
+        specs, rrs, ys, rec_ids, syms = features.extract_beats_from_record(
             filtered,
             fs,
             annotation.sample,
@@ -68,10 +70,13 @@ def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=Fal
         rr_list.extend(rrs)
         y_list.extend(ys)
         record_id_list.extend(rec_ids)
+        symbol_list.extend(syms)
 
     X_spec = np.array(spec_list, dtype=np.float32)[..., np.newaxis]
     X_rr = np.array(rr_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.int32)
     record_ids = np.array(record_id_list, dtype=object)
 
+    if return_symbols:
+        return X_spec, X_rr, y, record_ids, np.array(symbol_list, dtype=object)
     return X_spec, X_rr, y, record_ids

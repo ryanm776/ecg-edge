@@ -5,6 +5,7 @@ from ecg.features import (
     apply_rr_normalizer,
     compute_rr_timing_features,
     compute_spectrogram,
+    extract_beats_from_record,
     fit_rr_normalizer,
 )
 
@@ -76,3 +77,18 @@ def test_rr_normalizer_constant_feature_does_not_divide_by_zero():
     assert std[0] == 1.0
     assert np.all(np.isfinite(Z))
     np.testing.assert_allclose(Z[:, 0], 0.0, atol=1e-6)
+
+
+def test_extract_beats_returns_symbols_aligned_with_labels_and_augmentation():
+    fs = 360
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(5 * fs) / fs)
+    samples = np.array([10, 300, 600, 900, 1200, 1700])
+    symbols = ["N", "V", "N", "A", "+", "N"]  # "+" isn't a beat; first/last are skipped
+
+    _, _, y, record_ids, syms = extract_beats_from_record(
+        signal, fs, samples, symbols, "r", augment=True, rng=np.random.default_rng(0)
+    )
+
+    assert syms == ["V", "V", "N", "N", "A", "A"]  # each beat plus its jitter duplicate
+    assert y == [1, 1, 0, 0, 1, 1]
+    assert len(record_ids) == len(syms)

@@ -71,6 +71,7 @@ def extract_beats_from_record(
 
     `max_normal=None` means no cap on normal beats. `augment=True` adds an R-peak-jitter
     duplicate of each beat (simulating R-peak detection error) in addition to the original.
+    Also returns each beat's original annotation symbol (e.g. to split recall by V vs. S).
     """
     half_window = window_size // 2
     rng = rng if rng is not None else np.random.default_rng()
@@ -78,7 +79,7 @@ def extract_beats_from_record(
     rr_intervals = np.diff(samples) / fs
     normal_count = 0
 
-    spec_list, rr_list, y_list, record_id_list = [], [], [], []
+    spec_list, rr_list, y_list, record_id_list, symbol_list = [], [], [], [], []
 
     for i in range(1, len(samples) - 1):
         sample_idx = samples[i]
@@ -111,5 +112,6 @@ def extract_beats_from_record(
             rr_list.append(rr_features)
             y_list.append(target_class)
             record_id_list.append(record_id)
+            symbol_list.append(sym)
 
-    return spec_list, rr_list, y_list, record_id_list
+    return spec_list, rr_list, y_list, record_id_list, symbol_list

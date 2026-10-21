@@ -16,6 +16,7 @@ An ECG heartbeat classifier (Normal vs. Abnormal) trained on the MIT-BIH Arrhyth
 pip install -r requirements.txt   # once, inside .venv
 python scripts/train.py           # train + evaluate + export everything (see README.md for flags)
 python scripts/compare_variants.py  # float vs. INT8 for baseline / bn_folded / qat -> artifacts/variant_comparison.*
+python scripts/analyze_splits.py    # read-only val/test split diagnosis with the saved models -> artifacts/split_analysis/
 pytest                            # unit tests (features, export, threshold selection) — no network/data needed
 ```
 
