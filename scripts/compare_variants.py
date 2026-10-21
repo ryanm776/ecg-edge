@@ -28,9 +28,14 @@ DEFAULT_CALIB_SAMPLES = 100  # train.py's --calib-samples default
 COLUMNS = [
     "run", "variant", "calib_samples", "model", "threshold_from", "threshold", "val_f1",
     "test_precision", "test_recall", "test_f1", "tp", "fp", "fn", "fp_rec214", "fp_excl_214",
+    "pr_auc", "roc_auc", "r95_threshold", "r95_test_precision", "r95_test_recall", "r95_fp",
     "tflite_kb", "min_int8_levels",
 ]
-FLOAT_COLUMNS_3DP =["threshold", "val_f1", "test_precision", "test_recall", "test_f1"]
+FLOAT_COLUMNS_3DP = [
+    "threshold", "val_f1", "test_precision", "test_recall", "test_f1",
+    "pr_auc", "roc_auc", "r95_test_precision", "r95_test_recall",
+]
+FLOAT_COLUMNS_4DP = ["r95_threshold"]
 
 
 def parse_args():
@@ -101,10 +106,18 @@ def aggregate(artifacts_dir):
     paths = sorted(glob.glob(os.path.join(artifacts_dir, "variants", "*", "comparison_rows.csv")))
     if not paths:
         raise SystemExit(f"No runs found under {artifacts_dir}/variants/")
-    df = pd.concat(
-        [pd.read_csv(p, dtype={"variant": str}).assign(run=os.path.basename(os.path.dirname(p))) for p in paths],
-        ignore_index=True,
-    )
+    frames = []
+    for p in paths:
+        run = os.path.basename(os.path.dirname(p))
+        frame = pd.read_csv(p, dtype={"variant": str}).assign(run=run)
+        missing = [c for c in COLUMNS if c not in frame.columns]
+        if missing:
+            print(f"Skipping {run}: written by an older train.py (missing {', '.join(missing)}); re-run it to include it.")
+            continue
+        frames.append(frame)
+    if not frames:
+        raise SystemExit(f"No up-to-date runs found under {artifacts_dir}/variants/")
+    df = pd.concat(frames, ignore_index=True)
 
     base = df["variant"].str.split("+").str[0]
     df = df.assign(
@@ -119,9 +132,9 @@ def aggregate(artifacts_dir):
     csv_path = os.path.join(artifacts_dir, "variant_comparison.csv")
     md_path = os.path.join(artifacts_dir, "variant_comparison.md")
     df.to_csv(csv_path, index=False)
-    with open(md_path, "w") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(to_markdown(df))
-    print(f"\nWrote {csv_path} and {md_path} ({len(paths)} runs).")
+    print(f"\nWrote {csv_path} and {md_path} ({len(frames)} runs).")
     return df
 
 
@@ -131,6 +144,8 @@ def to_markdown(df):
             return "—"
         if col in FLOAT_COLUMNS_3DP:
             return f"{value:.3f}"
+        if col in FLOAT_COLUMNS_4DP:
+            return f"{value:.4f}"
         if isinstance(value, float) and value.is_integer():
             return str(int(value))
         return str(value)
@@ -141,6 +156,10 @@ def to_markdown(df):
         "Test set, seed 42. `threshold_from`: `int8_val` is the threshold chosen on the INT8 model's",
         "validation predictions (the deployed convention); `float_val` is the float model's own",
         "val-optimal threshold. For `qat`, the float row is the float model before QAT fine-tuning.",
+        "`val_f1` is the row's own model's validation F1 at the row's threshold.",
+        "Threshold-independent columns: `pr_auc` (average precision) and `roc_auc` on test, and the",
+        "fixed-recall operating point `r95_*`: the highest threshold reaching >= 0.95 recall on the",
+        "model's own validation predictions, then test precision / recall / FP at that threshold.",
         "`min_int8_levels` is the smallest number of INT8 levels any intermediate tensor spans.",
         "",
         "| " + " | ".join(df.columns) + " |",

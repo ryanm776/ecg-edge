@@ -59,6 +59,8 @@ def parse_args():
     parser.add_argument("--max-normal-per-record-train", type=int, default=600)
     parser.add_argument("--threshold-strategy", choices=["f1", "recall_at_precision"], default="f1")
     parser.add_argument("--min-precision", type=float, default=0.90)
+    parser.add_argument("--target-recall", type=float, default=0.95,
+                        help="Val recall for the fixed-recall operating point reported in comparison_rows.csv.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -69,22 +71,31 @@ def parse_args():
     return args
 
 
-def comparison_rows(label, args, threshold, val_sweep, float_threshold, float_val_sweep,
-                    y_test, record_ids_test, test_probs_float, test_probs_int8,
+def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshold, float_threshold,
                     tflite_kb, levels, evaluate):
     """One row per (model, threshold source): float @ INT8-val threshold, float @ its own
-    val threshold, and INT8 @ INT8-val threshold."""
-    def row(model_name, threshold_from, t, sweep, probs, extra):
-        overall, per_record = evaluate.evaluate_predictions(y_test, probs, record_ids_test, t)
+    val threshold, and INT8 @ INT8-val threshold. Every column is computed from the row's
+    own model: `val_f1` from that model's val sweep, PR/ROC-AUC from its test probabilities,
+    and the fixed-recall operating point from its own val predictions.
+
+    `preds` maps "float"/"int8" to (val_probs, val_sweep, test_probs).
+    """
+    def row(model_name, threshold_from, t):
+        val_probs, val_sweep, test_probs = preds[model_name]
+        overall, per_record = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t)
         (_, fp), (fn, tp) = overall["confusion_matrix"]
         fp_focus = int(per_record.loc[per_record["record_id"] == FOCUS_RECORD, "fp"].sum())
+
+        t_recall = evaluate.threshold_at_recall(y_val, val_probs, args.target_recall)
+        at_recall, _ = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t_recall)
+        is_int8 = model_name == "int8"
         return {
             "variant": label,
             "calib_samples": None if args.variant == "qat" else args.calib_samples,
             "model": model_name,
             "threshold_from": threshold_from,
             "threshold": t,
-            "val_f1": float(sweep.loc[sweep["threshold"] == t, "f1"].iloc[0]),
+            "val_f1": float(val_sweep.loc[val_sweep["threshold"] == t, "f1"].iloc[0]),
             "test_precision": overall["precision"],
             "test_recall": overall["recall"],
             "test_f1": overall["f1"],
@@ -93,15 +104,19 @@ def comparison_rows(label, args, threshold, val_sweep, float_threshold, float_va
             "fn": fn,
             f"fp_rec{FOCUS_RECORD}": fp_focus,
             f"fp_excl_{FOCUS_RECORD}": fp - fp_focus,
-            **extra,
+            **evaluate.ranking_metrics(y_test, test_probs),
+            "r95_threshold": t_recall,
+            "r95_test_precision": at_recall["precision"],
+            "r95_test_recall": at_recall["recall"],
+            "r95_fp": at_recall["confusion_matrix"][0][1],
+            "tflite_kb": round(tflite_kb, 2) if is_int8 else None,
+            "min_int8_levels": levels if is_int8 else None,
         }
 
-    no_tflite = {"tflite_kb": None, "min_int8_levels": None}
     return pd.DataFrame([
-        row("float", "int8_val", threshold, val_sweep, test_probs_float, no_tflite),
-        row("float", "float_val", float_threshold, float_val_sweep, test_probs_float, no_tflite),
-        row("int8", "int8_val", threshold, val_sweep, test_probs_int8,
-            {"tflite_kb": round(tflite_kb, 2), "min_int8_levels": levels}),
+        row("float", "int8_val", threshold),
+        row("float", "float_val", float_threshold),
+        row("int8", "int8_val", threshold),
     ])
 
 
@@ -260,9 +275,10 @@ def main():
     per_record_combined.to_csv(os.path.join(args.artifacts_dir, "per_record_metrics.csv"), index=False)
 
     comparison_rows(
-        label, args, threshold, sweep_df, float_threshold, float_sweep_df,
-        y_test, record_ids_test, test_probs_float, test_probs_int8,
-        model_size_kb, levels, evaluate,
+        label, args, y_val, y_test, record_ids_test,
+        {"float": (val_probs_float, float_sweep_df, test_probs_float),
+         "int8": (val_probs_int8, sweep_df, test_probs_int8)},
+        threshold, float_threshold, model_size_kb, levels, evaluate,
     ).to_csv(os.path.join(args.artifacts_dir, "comparison_rows.csv"), index=False)
 
     if args.no_firmware_export:

@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from ecg.evaluate import _bind_inputs, evaluate_predictions, select_threshold
+from ecg.evaluate import (
+    _bind_inputs,
+    evaluate_predictions,
+    ranking_metrics,
+    select_threshold,
+    threshold_at_recall,
+)
 
 
 def _separated_classes(seed, n_per_class=30):
@@ -93,3 +99,32 @@ def test_bind_inputs_rejects_ambiguous_shapes():
     details = [_detail("a", [1, 33, 12, 1]), _detail("b", [1, 33, 12, 1])]
     with pytest.raises(KeyError):
         _bind_inputs(details)
+
+
+def test_threshold_at_recall_is_highest_threshold_meeting_target():
+    rng = np.random.default_rng(3)
+    y_val = np.array([0] * 100 + [1] * 40)
+    probs = np.concatenate([rng.uniform(0, 0.6, 100), rng.uniform(0.2, 1.0, 40)])
+
+    t = threshold_at_recall(y_val, probs, target_recall=0.95)
+
+    recall = lambda thr: ((probs > thr) & (y_val == 1)).sum() / 40
+    assert recall(t) >= 0.95
+    # Nudging the threshold up to the next abnormal probability drops below the target.
+    next_pos = np.min(probs[(y_val == 1) & (probs > t)])
+    assert recall(next_pos) < 0.95
+
+
+def test_threshold_at_recall_with_tied_quantized_probs():
+    # INT8 outputs are multiples of 1/256, so ties are common; all tied beats count.
+    y_val = np.array([1, 1, 1, 1, 0])
+    probs = np.array([0.5, 0.5, 0.5, 0.9, 0.1])
+
+    t = threshold_at_recall(y_val, probs, target_recall=1.0)
+
+    assert t < 0.5 and ((probs > t) & (y_val == 1)).sum() == 4
+
+
+def test_ranking_metrics_perfect_separation():
+    y_val, probs = _separated_classes(seed=4)
+    assert ranking_metrics(y_val, probs) == {"pr_auc": 1.0, "roc_auc": 1.0}

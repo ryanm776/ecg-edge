@@ -4,7 +4,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import (
+    average_precision_score,
+    confusion_matrix,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
 
 from .export import dequantize_value, quantize_value
 
@@ -43,6 +48,18 @@ def select_threshold(y_val, probs_val, strategy="f1", min_precision=0.90):
         raise ValueError(f"Unknown threshold strategy: {strategy!r}")
 
     return float(best_row["threshold"]), sweep_df
+
+
+def threshold_at_recall(y_val, probs_val, target_recall=0.95):
+    """The highest threshold whose VALIDATION Abnormal recall (under `probs > t`) is still
+    >= target_recall. Exact, not snapped to THRESHOLD_SWEEP: it sits just below the
+    ceil(target_recall * n_abnormal)-th highest abnormal probability.
+    """
+    pos = np.sort(np.asarray(probs_val, dtype=np.float64)[np.asarray(y_val) == 1])[::-1]
+    if len(pos) == 0:
+        raise ValueError("no abnormal beats in the validation labels")
+    m = int(np.ceil(target_recall * len(pos)))
+    return float(np.nextafter(pos[m - 1], -np.inf))
 
 
 def _tensor_detail_by_name(details, name):
@@ -135,6 +152,14 @@ def min_int8_levels(tflite_path, X_spec, X_rr):
 
     worst = min(op_outputs, key=lambda i: hi[i] - lo[i])
     return hi[worst] - lo[worst], tensor_names[worst]
+
+
+def ranking_metrics(y_true, probs):
+    """Threshold-independent metrics for the Abnormal class. PR-AUC is average precision."""
+    return {
+        "pr_auc": float(average_precision_score(y_true, probs)),
+        "roc_auc": float(roc_auc_score(y_true, probs)),
+    }
 
 
 def evaluate_predictions(y_true, probs, record_ids, threshold):
