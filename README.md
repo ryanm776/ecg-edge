@@ -78,6 +78,7 @@ known deployment constraints).
 - Pan-Tompkins R-peak detection on device, replacing ground-truth annotations [7] (see CLAUDE.md deployment constraints)
 - Pruning for further model compression [9]
 - Tiered cloud data pipeline (edge buffering → Redis → PostgreSQL → object storage) for streaming results, following [8]
+- Switch to the standard de Chazal inter-patient split (DS1 train / DS2 test, validation carved patient-wise from DS1), motivated by the validation/test mismatch in artifacts/diagnosis.md [10]
 
 ## Related work
 
@@ -94,3 +95,4 @@ known deployment constraints).
 7. J. Pan and W. J. Tompkins, "A Real-Time QRS Detection Algorithm," IEEE Transactions on Biomedical Engineering, vol. BME-32, no. 3, pp. 230–236, 1985.
 8. S. Ghosh, R. Bhuvanakantham, P. Sindhujaa, P. B. Harishita, A. Mohan, B. Gulyás, D. Máthé, and P. Padmanabhan, "A Cloud-Aware Scalable Architecture for Distributed Edge-Enabled BCI Biosensor System," Biosensors, vol. 16, no. 3, p. 157, 2026. doi:10.3390/bios16030157
 9. M. Zhu and S. Gupta, "To prune, or not to prune: exploring the efficacy of pruning for model compression," arXiv:1710.01878, 2017.
+10. P. de Chazal, M. O'Dwyer, and R. B. Reilly, "Automatic classification of heartbeats using ECG morphology and heartbeat interval features," IEEE Transactions on Biomedical Engineering, vol. 51, no. 7, pp. 1196–1206, 2004.

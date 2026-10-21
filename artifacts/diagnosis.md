@@ -244,6 +244,8 @@ Threshold-independent: each type against normal beats, with the other abnormal t
 
 ### Proposal: switch to the de Chazal et al. inter-patient split (not implemented)
 
+Reference: P. de Chazal, M. O'Dwyer, and R. B. Reilly, "Automatic classification of heartbeats using ECG morphology and heartbeat interval features," IEEE Transactions on Biomedical Engineering, 2004.
+
 **Recommendation: adopt it, on a new branch after this one merges.**
 
 **DS1 (train + val) and DS2 (test), 22 records each.** Sums over the 19 records per set that are already cached:
