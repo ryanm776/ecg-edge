@@ -139,3 +139,14 @@ Compare, on the same seed:
 - (e) QAT on the reordered architecture
 
 Then add R-R normalization to the better of d/e as a separate row. Results will go in `variant_comparison.md`.
+
+## QAT follow-up (parked)
+
+- **QAT isn't needed for the current architecture.** BN folding alone closed the float→INT8 gap. In Run 1, bn_folded PTQ has float precision 0.853 vs INT8 0.852, FP 177 vs 179, and record 214 FP 6 vs 6. Its narrowest tensor spans 230 INT8 levels, up from the baseline's 5.
+- **The existing QAT run isn't a fair test of QAT.** Its float model, trained from scratch under tf_keras with the same architecture, data and seed as bn_folded, underperformed before any QAT fine-tuning:
+  - best val F1: 0.378 (threshold 0.15) vs bn_folded's 0.455 (threshold 0.40)
+  - its INT8 model's val F1: 0.359, vs bn_folded INT8's 0.451
+
+  QAT fine-tuning doesn't modify the float model (checked: no shared variables), so the deficit comes from the tf_keras float training itself. The cause wasn't investigated.
+- **A fair future test** should initialize QAT from bn_folded's trained float weights rather than retraining under tf_keras. For example, build the same model with `keras_mod=tf_keras` and copy the weights over with `get_weights`/`set_weights`, then run `quantize_aware` and fine-tune.
+- `ecg/qat.py` and `train.py --variant qat` stay in place for that test.
