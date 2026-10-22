@@ -4,7 +4,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import (
+    average_precision_score,
+    confusion_matrix,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
 
 from .export import dequantize_value, quantize_value
 
@@ -45,11 +50,43 @@ def select_threshold(y_val, probs_val, strategy="f1", min_precision=0.90):
     return float(best_row["threshold"]), sweep_df
 
 
+def threshold_at_recall(y_val, probs_val, target_recall=0.95):
+    """The highest threshold whose VALIDATION Abnormal recall (under `probs > t`) is still
+    >= target_recall. Exact, not snapped to THRESHOLD_SWEEP: it sits just below the
+    ceil(target_recall * n_abnormal)-th highest abnormal probability.
+    """
+    pos = np.sort(np.asarray(probs_val, dtype=np.float64)[np.asarray(y_val) == 1])[::-1]
+    if len(pos) == 0:
+        raise ValueError("no abnormal beats in the validation labels")
+    m = int(np.ceil(target_recall * len(pos)))
+    return float(np.nextafter(pos[m - 1], -np.inf))
+
+
 def _tensor_detail_by_name(details, name):
     for d in details:
         if name in d["name"]:
             return d
     raise KeyError(f"No tensor with name containing {name!r} found among {[d['name'] for d in details]}")
+
+
+def _bind_inputs(input_details, n_rr_features=5):
+    """Return (spec_detail, rr_detail). Binds by name substring when the names survived
+    conversion (PTQ models); otherwise falls back to element count, the same rule the
+    firmware uses (QAT models' inputs are named after tfmot's quantize_layer, not the
+    Keras inputs).
+    """
+    try:
+        return (
+            _tensor_detail_by_name(input_details, "spectrogram_input"),
+            _tensor_detail_by_name(input_details, "rr_input"),
+        )
+    except KeyError:
+        pass
+    rr = [d for d in input_details if int(np.prod(d["shape"])) == n_rr_features]
+    spec = [d for d in input_details if int(np.prod(d["shape"])) != n_rr_features]
+    if len(input_details) != 2 or len(rr) != 1 or len(spec) != 1:
+        raise KeyError(f"Can't bind spectrogram/R-R inputs among {[(d['name'], d['shape']) for d in input_details]}")
+    return spec[0], rr[0]
 
 
 def predict_tflite(tflite_path, X_spec, X_rr):
@@ -60,8 +97,7 @@ def predict_tflite(tflite_path, X_spec, X_rr):
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
-    spec_detail = _tensor_detail_by_name(input_details, "spectrogram_input")
-    rr_detail = _tensor_detail_by_name(input_details, "rr_input")
+    spec_detail, rr_detail = _bind_inputs(input_details)
     out_detail = output_details[0]
 
     spec_scale, spec_zp = spec_detail["quantization"]
@@ -82,6 +118,48 @@ def predict_tflite(tflite_path, X_spec, X_rr):
         probs[i] = dequantize_value(raw_output, out_scale, out_zp)
 
     return probs
+
+
+def min_int8_levels(tflite_path, X_spec, X_rr):
+    """Smallest number of INT8 levels any op-output tensor actually spans over the given
+    beats (observed max - min of its int8 values), and that tensor's name. This is the
+    diagnostic from artifacts/diagnosis.md: the baseline's pre-BN tensors span ~4-5.
+    """
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_path), experimental_preserve_all_tensors=True)
+    interpreter.allocate_tensors()
+
+    spec_detail, rr_detail = _bind_inputs(interpreter.get_input_details())
+    spec_scale, spec_zp = spec_detail["quantization"]
+    rr_scale, rr_zp = rr_detail["quantization"]
+
+    tensor_names = {d["index"]: d["name"] for d in interpreter.get_tensor_details()}
+    tensor_dtypes = {d["index"]: d["dtype"] for d in interpreter.get_tensor_details()}
+    op_outputs = sorted({
+        i for op in interpreter._get_ops_details() for i in op["outputs"]
+        if i >= 0 and tensor_dtypes[i] == np.int8
+    })
+
+    lo = {i: 127 for i in op_outputs}
+    hi = {i: -128 for i in op_outputs}
+    for n in range(len(X_spec)):
+        interpreter.set_tensor(spec_detail["index"], quantize_value(X_spec[n:n + 1], spec_scale, spec_zp))
+        interpreter.set_tensor(rr_detail["index"], quantize_value(X_rr[n:n + 1], rr_scale, rr_zp))
+        interpreter.invoke()
+        for i in op_outputs:
+            t = interpreter.get_tensor(i)
+            lo[i] = min(lo[i], int(t.min()))
+            hi[i] = max(hi[i], int(t.max()))
+
+    worst = min(op_outputs, key=lambda i: hi[i] - lo[i])
+    return hi[worst] - lo[worst], tensor_names[worst]
+
+
+def ranking_metrics(y_true, probs):
+    """Threshold-independent metrics for the Abnormal class. PR-AUC is average precision."""
+    return {
+        "pr_auc": float(average_precision_score(y_true, probs)),
+        "roc_auc": float(roc_auc_score(y_true, probs)),
+    }
 
 
 def evaluate_predictions(y_true, probs, record_ids, threshold):

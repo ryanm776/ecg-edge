@@ -6,6 +6,11 @@ __pycache__/
 
 # Training logs
 logs/
+*.log
+
+# Per-run comparison and analysis outputs (regenerable; findings go in artifacts/diagnosis.md)
+artifacts/variants/
+artifacts/split_analysis/
 
 # Editor settings
 .vscode/

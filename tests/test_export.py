@@ -1,4 +1,10 @@
-from ecg.export import dequantize_value, quantize_value, write_c_header, write_threshold_header
+from ecg.export import (
+    dequantize_value,
+    quantize_value,
+    write_c_header,
+    write_rr_norm_header,
+    write_threshold_header,
+)
 
 
 def test_write_c_header_format(tmp_path):
@@ -24,6 +30,17 @@ def test_write_threshold_header_format(tmp_path):
 
     assert "constexpr float kAbnormalThreshold = 0.3000f;" in text
     assert "#ifndef" in text and "#endif" in text
+
+
+def test_write_rr_norm_header_format(tmp_path):
+    path = tmp_path / "rr_norm.h"
+
+    write_rr_norm_header([0.8, 0.81, 0.79, 1.0, 1.05], [0.2, 0.21, 0.15, 0.3, 0.5], path)
+    text = path.read_text()
+
+    assert "constexpr float kRrMean[5] = {0.800000f, 0.810000f, 0.790000f, 1.000000f, 1.050000f};" in text
+    assert "constexpr float kRrStd[5] = {0.200000f, 0.210000f, 0.150000f, 0.300000f, 0.500000f};" in text
+    assert "#ifndef RR_NORM_H_" in text and text.strip().endswith("#endif  // RR_NORM_H_")
 
 
 def test_quantize_dequantize_roundtrip_scalar():

@@ -43,6 +43,19 @@ def compute_rr_timing_features(rr_intervals, i, lookback=10):
     return [pre_rr, post_rr, local_mean_rr, rr_ratio, pre_post_ratio]
 
 
+def fit_rr_normalizer(X_rr):
+    """Per-feature mean/std of the R-R features. Fit on the training set only."""
+    X_rr = np.asarray(X_rr, dtype=np.float64)
+    mean = X_rr.mean(axis=0)
+    std = X_rr.std(axis=0)
+    std[std < 1e-12] = 1.0  # a constant feature passes through centered, not divided by ~zero
+    return mean, std
+
+
+def apply_rr_normalizer(X_rr, mean, std):
+    return ((np.asarray(X_rr) - mean) / std).astype(np.float32)
+
+
 def extract_beats_from_record(
     filtered_signal,
     fs,
@@ -58,6 +71,7 @@ def extract_beats_from_record(
 
     `max_normal=None` means no cap on normal beats. `augment=True` adds an R-peak-jitter
     duplicate of each beat (simulating R-peak detection error) in addition to the original.
+    Also returns each beat's original annotation symbol (e.g. to split recall by V vs. S).
     """
     half_window = window_size // 2
     rng = rng if rng is not None else np.random.default_rng()
@@ -65,7 +79,7 @@ def extract_beats_from_record(
     rr_intervals = np.diff(samples) / fs
     normal_count = 0
 
-    spec_list, rr_list, y_list, record_id_list = [], [], [], []
+    spec_list, rr_list, y_list, record_id_list, symbol_list = [], [], [], [], []
 
     for i in range(1, len(samples) - 1):
         sample_idx = samples[i]
@@ -98,5 +112,6 @@ def extract_beats_from_record(
             rr_list.append(rr_features)
             y_list.append(target_class)
             record_id_list.append(record_id)
+            symbol_list.append(sym)
 
-    return spec_list, rr_list, y_list, record_id_list
+    return spec_list, rr_list, y_list, record_id_list, symbol_list

@@ -37,6 +37,17 @@ float dequantize_int8_to_float(int8_t value, float scale, int32_t zero_point) {
     return (static_cast<float>(value) - static_cast<float>(zero_point)) * scale;
 }
 
+// 4. Tensor size helper, used to bind inputs by shape rather than by index
+constexpr int kRrFeatureCount = 5;
+
+int tensor_element_count(const TfLiteTensor* tensor) {
+    int count = 1;
+    for (int d = 0; d < tensor->dims->size; d++) {
+        count *= tensor->dims->data[d];
+    }
+    return count;
+}
+
 void setup() {
     Serial.begin(115200);
     // Wait up to 3 seconds for Native USB CDC Serial on ESP32-S3
@@ -66,13 +77,21 @@ void setup() {
         return;
     }
 
-    // Assign and check tensors
-    spec_input_tensor = interpreter->input(0);
-    rr_input_tensor   = interpreter->input(1);
-    output_tensor     = interpreter->output(0);
+    // Bind inputs by element count, not index: the converter does not preserve the Keras
+    // input order (the current flatbuffer has rr_input at index 0, spectrogram at index 1).
+    for (size_t i = 0; i < interpreter->inputs_size(); i++) {
+        TfLiteTensor* t = interpreter->input(i);
+        if (t && tensor_element_count(t) == kRrFeatureCount) {
+            rr_input_tensor = t;
+        } else if (t) {
+            spec_input_tensor = t;
+        }
+    }
+    output_tensor = interpreter->output(0);
 
-    if (!spec_input_tensor || !rr_input_tensor || !output_tensor) {
+    if (interpreter->inputs_size() != 2 || !spec_input_tensor || !rr_input_tensor || !output_tensor) {
         Serial.println("Error: Failed to bind input/output tensors!");
+        spec_input_tensor = rr_input_tensor = output_tensor = nullptr;
         return;
     }
 
