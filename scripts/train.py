@@ -50,7 +50,7 @@ TEST_RECORDS = list(DS2_RECORDS)
 
 # Grouped cross-validation over DS1 (scripts/train_cv.py), patient-wise folds. 201 trains in every fold and is
 # never held out, so the pooled out-of-fold threshold never sees the 201/202 patient. Folds are balanced for
-# V and S beats (each has >= 575 V and >= 97 S); the LBBB records 109/207 and the RBBB records 118/124 are
+# V and S beats (each has >= 575 V and >= 100 S); the LBBB records 109/207 and the RBBB records 118/124 are
 # in different folds. Fold 0 holds 209, which has 41% of DS1's S beats.
 CV_ALWAYS_TRAIN = ["201"]
 CV_FOLDS = [

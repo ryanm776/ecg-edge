@@ -103,6 +103,60 @@ Known limitations:
   `scripts/train.py` also reports test metrics without 202 (`*_excl_202` in `metrics.json` and
   `variant_comparison.*`), alongside the full-DS2 numbers rather than instead of them.
 
+### Grouped cross-validation
+
+```bash
+python scripts/train_cv.py --seeds 42 43 44     # bn_folded only
+```
+
+A fixed 5-record validation set gives an unstable operating point: across seeds 42–44, bn_folded's
+DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split results").
+`scripts/train_cv.py` instead picks the threshold and the epoch count from patient-grouped CV over DS1:
+
+1. **5 folds** (`CV_FOLDS` in `scripts/train.py`). Each fold model trains on DS1 minus the fold and
+   early-stops on the held-out fold, is converted to INT8, and scores the held-out fold.
+2. **Threshold** is selected on the pooled out-of-fold INT8 scores from 21 DS1 records. Scores go
+   through `evaluate.abnormal_score`: P(abnormal) for binary output, 1 − P(N) for multiclass.
+3. **Final model** trains on all 22 DS1 records for the median of the folds' best epochs, with no
+   early stopping and no ensembling (ESP32 limits). It is evaluated once on DS2 at that threshold.
+
+Results go in `artifacts/dechazal/cv_comparison.{csv,md}`. Per-run files are in
+`artifacts/dechazal/cv/<variant>_seed<S>/`: `folds.json`, `oof_per_record_metrics.csv`, and the usual
+metrics. `folds.json` also has a diagnostic DS2 evaluation of each fold model. It shows fold-to-fold
+spread and whether the final model is in line with the fold models; it is never used for any choice.
+
+Folds (from `python scripts/analyze_splits.py --counts-only`):
+
+| fold | records | beats | V (V, E) | S (A, a, J, S) | bundle branch block |
+|---|---|---|---|---|---|
+| 0 | 209, 203, 215 | 9,337 | 609 | 388 | — |
+| 1 | 207, 106, 112, 122 | 8,895 | 730 | 108 | LBBB 207 |
+| 2 | 118, 119, 116, 205 | 9,317 | 640 | 100 | RBBB 118 |
+| 3 | 220, 208, 230, 115, 114 | 10,705 | 1,036 | 108 | — |
+| 4 | 223, 124, 109, 108, 101 | 10,351 | 575 | 111 | LBBB 109, RBBB 124 |
+| always train | 201 | 1,960 | 198 | 128 | — |
+
+- **201 is never held out.** It trains in every fold and in the final model, so the pooled-OOF
+  threshold never sees the 201/202 patient.
+- The two LBBB records (109, 207) are in different folds, and so are the two RBBB records (118, 124).
+
+Caveats:
+- **Early stopping on the held-out fold** also scores that fold, so the OOF estimate is slightly
+  optimistic. This is standard non-nested CV.
+- **Fold models vs. final model:** the threshold is chosen on fold models trained on ~80% of DS1
+  and applied to a final model trained on 100%, so the final model's score distribution may shift
+  slightly. The fold-model DS2 diagnostic in `folds.json` shows how much.
+- **Fold 0 holds record 209,** which has 41% of DS1's S beats. Fold 0's model therefore trains with
+  few S beats: 555 of 943, including 201's 128.
+
+**AAMI-style per-class metrics.** The CV tables report sensitivity (`se_V`, `se_S`) and positive
+predictivity (`pp_V`, `pp_S`) for the V class (V, E) and the S class (A, a, J, S) on DS2, alongside
+the binary metrics.
+- For a binary model, +P is undefined, because an "abnormal" prediction names neither S nor V. It
+  shows `—`, and it is filled in once a multiclass model exists.
+- F and Q beats are dropped by the dataset (DS2 has 388 F beats), so class totals differ from papers
+  that keep F.
+
 ## Testing
 
 ```bash
@@ -120,12 +174,6 @@ known deployment constraints).
 
 ## Future work
 
-- Grouped cross-validation over DS1. With only two LBBB patients and 943 S beats in DS1, any fixed
-  validation set is an estimate from one or two patients. Planned procedure:
-  - patient-grouped 5-fold CV on DS1
-  - threshold chosen from the pooled out-of-fold predictions; epoch count from the folds' best epochs
-  - one final model trained on all 22 DS1 records with those settings, evaluated once on DS2
-  - no ensembling, because of ESP32 compute and memory limits
 - Pan-Tompkins R-peak detection on device, replacing ground-truth annotations [7] (see CLAUDE.md deployment constraints)
 - Pruning for further model compression [9]
 - Tiered cloud data pipeline (edge buffering → Redis → PostgreSQL → object storage) for streaming results, following [8]
