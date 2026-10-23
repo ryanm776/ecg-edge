@@ -24,7 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ecg.features import type_recall  # noqa: E402  (numpy/scipy only)
+from ecg.features import aami_class_metrics, type_recall  # noqa: E402  (numpy/scipy only)
 
 # de Chazal et al., IEEE TBME 2004 inter-patient split: DS1 = train + val, DS2 = test.
 # The paced records are excluded from both.
@@ -150,6 +150,7 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, p
         excl, _ = evaluate.evaluate_predictions(y_keep, np.asarray(test_probs)[keep], records_keep, t)
         (_, excl_fp), (excl_fn, _) = excl["confusion_matrix"]
         by_type = type_recall(y_test, symbols_test, test_probs, t)
+        aami = aami_class_metrics(symbols_test, abnormal_pred=np.asarray(test_probs) > t)
 
         t_recall = evaluate.threshold_at_recall(y_val, val_probs, args.target_recall)
         at_recall, _ = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t_recall)
@@ -170,6 +171,11 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, p
             "fn": fn,
             "recall_ventricular": by_type["ventricular"][2],
             "recall_supraventricular": by_type["supraventricular"][2],
+            # AAMI-style Se / +P; +P is NaN for a binary model (see aami_class_metrics).
+            "se_V": aami["V"][1],
+            "pp_V": aami["V"][2],
+            "se_S": aami["S"][1],
+            "pp_S": aami["S"][2],
             f"fp_rec{FOCUS_RECORD}": fp_focus,
             f"fp_excl_{FOCUS_RECORD}": fp - fp_focus,
             "n_beats": overall["n_beats"],

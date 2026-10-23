@@ -33,6 +33,49 @@ def type_recall(y, symbols, probs, threshold):
     return out
 
 
+# AAMI EC57 classes for the beats this dataset keeps (F and Q beats are dropped by extract_beats_from_record).
+AAMI_CLASSES = {
+    "N": tuple(s for s, label in SYMBOL_MAP.items() if label == 0),
+    "S": SUPRAVENTRICULAR,
+    "V": VENTRICULAR,
+}
+
+
+def aami_class(symbols):
+    """AAMI class ("N", "S", "V") of each beat's annotation symbol; "" for symbols outside them."""
+    symbols = np.asarray(symbols)
+    out = np.full(symbols.shape, "", dtype=object)
+    for cls, syms in AAMI_CLASSES.items():
+        out[np.isin(symbols, syms)] = cls
+    return out
+
+
+def aami_class_metrics(symbols, abnormal_pred=None, pred_classes=None):
+    """AAMI sensitivity (Se) and positive predictivity (+P) for S and V: {cls: (n, se, pp)}.
+
+    Pass exactly one of:
+    - `abnormal_pred` (binary model, bool per beat): Se is the fraction of the class's beats predicted
+      abnormal. +P is NaN: an abnormal prediction doesn't name S or V, so there is no predicted-S/V set.
+    - `pred_classes` (multiclass model, "N"/"S"/"V" per beat): Se = TP / n and +P = TP / predicted as the class.
+    """
+    if (abnormal_pred is None) == (pred_classes is None):
+        raise ValueError("Pass exactly one of abnormal_pred or pred_classes")
+    true = aami_class(symbols)
+    out = {}
+    for cls in ("S", "V"):
+        is_cls = true == cls
+        n = int(is_cls.sum())
+        if abnormal_pred is not None:
+            tp, n_pred = int(np.asarray(abnormal_pred, dtype=bool)[is_cls].sum()), None
+        else:
+            predicted = np.asarray(pred_classes) == cls
+            tp, n_pred = int((predicted & is_cls).sum()), int(predicted.sum())
+        se = tp / n if n else float("nan")
+        pp = tp / n_pred if n_pred else float("nan")
+        out[cls] = (n, se, pp)
+    return out
+
+
 def bandpass_filter(raw_signal, fs, low=0.5, high=40.0):
     nyq = 0.5 * fs
     b, a = signal.butter(2, [low / nyq, high / nyq], btype="band")

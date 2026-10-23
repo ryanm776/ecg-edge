@@ -1,13 +1,63 @@
 import numpy as np
 import scipy.signal as signal
 
+import pytest
+
 from ecg.features import (
+    SYMBOL_MAP,
+    aami_class,
+    aami_class_metrics,
     apply_rr_normalizer,
     compute_rr_timing_features,
     compute_spectrogram,
     extract_beats_from_record,
     fit_rr_normalizer,
+    type_recall,
 )
+
+
+def test_aami_classes_cover_the_binary_symbol_map():
+    symbols = np.array(list(SYMBOL_MAP) + ["F", "Q"], dtype=object)
+    classes = aami_class(symbols)
+    for sym, cls in zip(symbols, classes):
+        if sym in SYMBOL_MAP:
+            assert (cls == "N") == (SYMBOL_MAP[sym] == 0)
+        else:
+            assert cls == ""
+
+
+def test_aami_binary_se_equals_type_recall_and_pp_is_undefined():
+    rng = np.random.default_rng(0)
+    symbols = rng.choice(np.array(["N", "L", "V", "E", "A", "a", "J"], dtype=object), 200)
+    y = np.array([SYMBOL_MAP[s] for s in symbols])
+    probs = rng.uniform(size=200)
+
+    m = aami_class_metrics(symbols, abnormal_pred=probs > 0.5)
+    by_type = type_recall(y, symbols, probs, 0.5)
+
+    assert m["V"][:2] == (by_type["ventricular"][0], by_type["ventricular"][2])
+    assert m["S"][:2] == (by_type["supraventricular"][0], by_type["supraventricular"][2])
+    assert np.isnan(m["V"][2]) and np.isnan(m["S"][2])
+
+
+def test_aami_multiclass_se_and_pp_from_confusion_counts():
+    #            true: N  N  N  S  S  S  V  V
+    symbols = np.array(["N", "R", "N", "A", "J", "A", "V", "E"], dtype=object)
+    pred = np.array(["N", "S", "V", "S", "S", "V", "V", "N"], dtype=object)
+
+    m = aami_class_metrics(symbols, pred_classes=pred)
+
+    # S: 2 of 3 true S predicted S; 3 predicted S, 2 correct.
+    assert m["S"] == (3, 2 / 3, 2 / 3)
+    # V: 1 of 2 true V predicted V; 3 predicted V, 1 correct.
+    assert m["V"] == (2, 1 / 2, 1 / 3)
+
+
+def test_aami_class_metrics_needs_exactly_one_prediction_kind():
+    with pytest.raises(ValueError):
+        aami_class_metrics(["N"])
+    with pytest.raises(ValueError):
+        aami_class_metrics(["N"], abnormal_pred=[False], pred_classes=["N"])
 
 
 def test_compute_spectrogram_shape_matches_scipy_and_is_normalized():

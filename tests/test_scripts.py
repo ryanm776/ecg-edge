@@ -215,6 +215,9 @@ def test_comparison_rows_use_each_models_own_val_sweep():
         pred = test_probs > row_["threshold"]
         assert row_["recall_ventricular"] == pred[symbols == "V"].mean()
         assert row_["recall_supraventricular"] == pred[symbols == "A"].mean()
+        # AAMI Se is the same quantity for a binary model; +P is undefined for it.
+        assert (row_["se_V"], row_["se_S"]) == (row_["recall_ventricular"], row_["recall_supraventricular"])
+        assert pd.isna(row_["pp_V"]) and pd.isna(row_["pp_S"])
         assert row_["seed"] == 43
 
 
