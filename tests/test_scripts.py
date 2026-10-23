@@ -27,9 +27,9 @@ def _parse(module, monkeypatch, *argv):
     return module.parse_args()
 
 
-def test_train_calib_samples_defaults_to_100(monkeypatch):
+def test_train_defaults_to_bn_folded_with_100_calib_samples(monkeypatch):
     args = _parse(train, monkeypatch)
-    assert args.calib_samples == 100 and args.variant == "baseline"
+    assert args.calib_samples == 100 and args.variant == "bn_folded"
 
 
 @pytest.mark.parametrize("argv", [
@@ -55,6 +55,10 @@ def test_compare_defaults_to_dechazal_dir_and_trains_baseline(monkeypatch):
     args = _parse(compare_variants, monkeypatch)
     assert Path(args.artifacts_dir) == Path("artifacts") / "dechazal"
     assert args.baseline_model is None
+    # The baseline is retired from new experiments; it runs only when asked for.
+    assert args.variants == ["bn_folded"]
+    assert _parse(compare_variants, monkeypatch, "--variants", "baseline", "bn_folded").variants == [
+        "baseline", "bn_folded"]
 
 
 def test_run_name():

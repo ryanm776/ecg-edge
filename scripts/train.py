@@ -7,8 +7,8 @@ from the INT8 model's validation predictions, evaluates both the float and INT8
 models on the full test set (overall + per-record), and writes all artifacts.
 
 `--variant` picks the architecture/quantization path (see artifacts/diagnosis.md):
-  baseline   build_multiscale_ptq_model + PTQ (the current deployed model)
-  bn_folded  build_multiscale_bn_folded_model + PTQ
+  bn_folded  build_multiscale_bn_folded_model + PTQ (the default; the architecture going forward)
+  baseline   build_multiscale_ptq_model + PTQ (retired from new experiments; kept for reproducibility)
   qat        build_multiscale_bn_folded_model, trained float, then QAT fine-tuned.
              Runs under tf_keras (TF_USE_LEGACY_KERAS=1, set below before TF is imported).
 """
@@ -74,7 +74,7 @@ def parse_args():
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--artifacts-dir", default="artifacts")
     parser.add_argument("--deployment-dir", default="deployment_model")
-    parser.add_argument("--variant", choices=["baseline", "bn_folded", "qat"], default="baseline")
+    parser.add_argument("--variant", choices=["baseline", "bn_folded", "qat"], default="bn_folded")
     parser.add_argument("--normalize-rr", action="store_true",
                         help="Standardize the R-R features with train-set mean/std (saved to rr_norm.json).")
     parser.add_argument("--no-firmware-export", action="store_true",

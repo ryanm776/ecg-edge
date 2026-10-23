@@ -86,7 +86,8 @@ VARIANT_TABLE = Table(
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--variants", nargs="+", choices=VARIANTS, default=VARIANTS)
+    # bn_folded only by default: the baseline is retired from new experiments (pass it explicitly to reproduce).
+    parser.add_argument("--variants", nargs="+", choices=VARIANTS, default=["bn_folded"])
     parser.add_argument("--normalize-rr", action="store_true", help="Pass --normalize-rr to every run.")
     parser.add_argument("--calib-samples", nargs="+", type=int, default=[DEFAULT_CALIB_SAMPLES],
                         help="PTQ calibration-set sizes to evaluate (e.g. 100 500 1000 5000).")
