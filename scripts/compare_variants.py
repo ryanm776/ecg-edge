@@ -28,12 +28,13 @@ DEFAULT_CALIB_SAMPLES = 100  # train.py's --calib-samples default
 COLUMNS = [
     "run", "variant", "calib_samples", "model", "threshold_from", "threshold", "val_f1",
     "test_precision", "test_recall", "test_f1", "tp", "fp", "fn", "fp_rec214", "fp_excl_214",
+    "f1_excl_202", "fp_excl_202", "fn_excl_202", "pr_auc_excl_202",
     "pr_auc", "roc_auc", "r95_threshold", "r95_test_precision", "r95_test_recall", "r95_fp",
     "tflite_kb", "min_int8_levels",
 ]
 FLOAT_COLUMNS_3DP = [
     "threshold", "val_f1", "test_precision", "test_recall", "test_f1",
-    "pr_auc", "roc_auc", "r95_test_precision", "r95_test_recall",
+    "f1_excl_202", "pr_auc_excl_202", "pr_auc", "roc_auc", "r95_test_precision", "r95_test_recall",
 ]
 FLOAT_COLUMNS_4DP = ["r95_threshold"]
 
@@ -161,6 +162,8 @@ def to_markdown(df):
         "fixed-recall operating point `r95_*`: the highest threshold reaching >= 0.95 recall on the",
         "model's own validation predictions, then test precision / recall / FP at that threshold.",
         "`min_int8_levels` is the smallest number of INT8 levels any intermediate tensor spans.",
+        "`*_excl_202`: sensitivity check, test re-evaluated without record 202 (same patient as train",
+        "record 201); reported alongside the full-test columns, not instead of them.",
         "",
         "| " + " | ".join(df.columns) + " |",
         "|" + "|".join("---" for _ in df.columns) + "|",

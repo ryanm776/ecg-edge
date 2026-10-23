@@ -94,13 +94,19 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
     own model: `val_f1` from that model's val sweep, PR/ROC-AUC from its test probabilities,
     and the fixed-recall operating point from its own val predictions.
 
-    `preds` maps "float"/"int8" to (val_probs, val_sweep, test_probs).
+    `preds` maps "float"/"int8" to (val_probs, val_sweep, test_probs). The `*_excl_<OVERLAP_RECORD>`
+    columns re-evaluate test without the record whose patient is also in train.
     """
+    keep = np.asarray(record_ids_test) != OVERLAP_RECORD
+    y_keep, records_keep = np.asarray(y_test)[keep], np.asarray(record_ids_test)[keep]
+
     def row(model_name, threshold_from, t):
         val_probs, val_sweep, test_probs = preds[model_name]
         overall, per_record = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t)
         (_, fp), (fn, tp) = overall["confusion_matrix"]
         fp_focus = int(per_record.loc[per_record["record_id"] == FOCUS_RECORD, "fp"].sum())
+        excl, _ = evaluate.evaluate_predictions(y_keep, np.asarray(test_probs)[keep], records_keep, t)
+        (_, excl_fp), (excl_fn, _) = excl["confusion_matrix"]
 
         t_recall = evaluate.threshold_at_recall(y_val, val_probs, args.target_recall)
         at_recall, _ = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t_recall)
@@ -120,6 +126,12 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
             "fn": fn,
             f"fp_rec{FOCUS_RECORD}": fp_focus,
             f"fp_excl_{FOCUS_RECORD}": fp - fp_focus,
+            "n_beats": overall["n_beats"],
+            f"n_beats_excl_{OVERLAP_RECORD}": excl["n_beats"],
+            f"f1_excl_{OVERLAP_RECORD}": excl["f1"],
+            f"fp_excl_{OVERLAP_RECORD}": excl_fp,
+            f"fn_excl_{OVERLAP_RECORD}": excl_fn,
+            f"pr_auc_excl_{OVERLAP_RECORD}": evaluate.ranking_metrics(y_keep, np.asarray(test_probs)[keep])["pr_auc"],
             **evaluate.ranking_metrics(y_test, test_probs),
             "r95_threshold": t_recall,
             "r95_test_precision": at_recall["precision"],
@@ -257,6 +269,13 @@ def main():
     print(json.dumps(int8_overall, indent=2))
     print(int8_per_record.to_string(index=False))
 
+    # Sensitivity check, not a replacement for the full-test numbers: test without the record
+    # whose patient (201) is also in train.
+    keep = record_ids_test != OVERLAP_RECORD
+
+    def overall_excl_overlap(probs, t):
+        return evaluate.evaluate_predictions(y_test[keep], probs[keep], record_ids_test[keep], t)[0]
+
     model_size_kb = len(tflite_bytes) / 1024
     print(f"\nModel size (INT8 .tflite): {model_size_kb:.2f} KB")
 
@@ -282,6 +301,9 @@ def main():
             "float": float_overall,
             "float_own_threshold": float_own_overall,
             "int8": int8_overall,
+            f"float_excl_{OVERLAP_RECORD}": overall_excl_overlap(test_probs_float, threshold),
+            f"float_own_threshold_excl_{OVERLAP_RECORD}": overall_excl_overlap(test_probs_float, float_threshold),
+            f"int8_excl_{OVERLAP_RECORD}": overall_excl_overlap(test_probs_int8, threshold),
         }, f, indent=2)
 
     per_record_combined = pd.concat([

@@ -57,7 +57,8 @@ def test_run_name():
 def _rows(variant, calib):
     base = {"variant": variant, "calib_samples": calib, "threshold": 0.35, "val_f1": 0.5,
             "test_precision": 0.8, "test_recall": 0.9, "test_f1": 0.85, "tp": 10, "fp": 2, "fn": 1,
-            "fp_rec214": 1, "fp_excl_214": 1, "pr_auc": 0.9, "roc_auc": 0.95, "r95_threshold": 0.12345,
+            "fp_rec214": 1, "fp_excl_214": 1,
+            "f1_excl_202": 0.84, "fp_excl_202": 1, "fn_excl_202": 1, "pr_auc_excl_202": 0.88, "pr_auc": 0.9, "roc_auc": 0.95, "r95_threshold": 0.12345,
             "r95_test_precision": 0.7, "r95_test_recall": 0.96, "r95_fp": 5,
             "tflite_kb": None, "min_int8_levels": None}
     return pd.DataFrame([
@@ -106,7 +107,7 @@ def test_comparison_rows_use_each_models_own_val_sweep():
     rng = np.random.default_rng(0)
     y_val = np.array([0] * 50 + [1] * 50)
     y_test = np.array([0] * 40 + [1] * 40)
-    record_ids = np.array(["214"] * 20 + ["100"] * 60)
+    record_ids = np.array(["214"] * 20 + ["202"] * 20 + ["100"] * 40, dtype=object)
     good = lambda y: np.where(y == 1, rng.uniform(0.6, 1.0, len(y)), rng.uniform(0.0, 0.4, len(y)))
     noisy = lambda y: rng.uniform(0.0, 1.0, len(y))
     preds = {}
@@ -129,3 +130,16 @@ def test_comparison_rows_use_each_models_own_val_sweep():
     assert float_row["roc_auc"] > int8_row["roc_auc"]
     assert float_row["r95_threshold"] == evaluate.threshold_at_recall(y_val, preds["float"][0], 0.95)
     assert pd.isna(float_row["tflite_kb"]) and int8_row["min_int8_levels"] == 200
+
+    # Every row's excl-202 columns equal the metrics computed directly on the masked arrays,
+    # whatever the model's quality.
+    keep = record_ids != "202"
+    for _, row_ in df.iterrows():
+        test_probs = preds[row_["model"]][2]
+        excl, _ = evaluate.evaluate_predictions(y_test[keep], test_probs[keep], record_ids[keep], row_["threshold"])
+        (_, fp), (fn, _) = excl["confusion_matrix"]
+        assert row_["f1_excl_202"] == excl["f1"]
+        assert (row_["fp_excl_202"], row_["fn_excl_202"]) == (fp, fn)
+        assert row_["pr_auc_excl_202"] == evaluate.ranking_metrics(y_test[keep], test_probs[keep])["pr_auc"]
+        assert row_["n_beats"] == len(y_test)
+        assert row_["n_beats_excl_202"] == row_["n_beats"] - int((record_ids == "202").sum())
