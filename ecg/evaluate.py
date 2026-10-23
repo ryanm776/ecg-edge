@@ -16,6 +16,20 @@ from .export import dequantize_value, quantize_value
 THRESHOLD_SWEEP = np.round(np.arange(0.05, 0.96, 0.05), 2)
 
 
+def abnormal_score(probs, normal_index=0):
+    """Binary abnormal score that every threshold sweep runs on, for binary and multiclass models alike.
+
+    Binary output, shape (n,) or (n, 1), is P(abnormal) already and is returned flattened.
+    Multiclass output, shape (n, k), gives 1 - P(normal), where `normal_index` is the normal class's column.
+    """
+    probs = np.asarray(probs)
+    if probs.ndim == 1 or (probs.ndim == 2 and probs.shape[1] == 1):
+        return probs.reshape(-1)
+    if probs.ndim != 2:
+        raise ValueError(f"Expected (n,), (n, 1) or (n, k) probabilities, got shape {probs.shape}")
+    return 1.0 - probs[:, normal_index]
+
+
 def _sweep_thresholds(y_true, probs, thresholds):
     rows = []
     for t in thresholds:
