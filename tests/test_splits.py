@@ -51,3 +51,19 @@ def test_ds1_is_train_plus_val_and_ds2_is_test():
     assert set(train.TEST_RECORDS) == set(train.DS2_RECORDS)
     # 44 records + 4 paced = all 48 MIT-BIH records.
     assert len(set(train.DS1_RECORDS) | set(train.DS2_RECORDS) | set(train.PACED_RECORDS)) == 48
+
+
+def test_cv_folds_partition_ds1_without_201():
+    folded = [r for fold in train.CV_FOLDS for r in fold]
+    assert len(train.CV_FOLDS) == 5
+    assert len(folded) == len(set(folded))
+    assert set(folded) | set(train.CV_ALWAYS_TRAIN) == set(train.DS1_RECORDS)
+    assert not set(folded) & set(train.CV_ALWAYS_TRAIN)
+    # 201 is never held out, so threshold selection never sees the 201/202 patient.
+    assert train.CV_ALWAYS_TRAIN == ["201"]
+
+
+@pytest.mark.parametrize("pair", [("109", "207"), ("118", "124")], ids=["LBBB", "RBBB"])
+def test_cv_bundle_branch_block_records_in_different_folds(pair):
+    fold_of = {r: i for i, fold in enumerate(train.CV_FOLDS) for r in fold}
+    assert fold_of[pair[0]] != fold_of[pair[1]]

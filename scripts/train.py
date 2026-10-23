@@ -48,6 +48,19 @@ VAL_RECORDS = ["115", "122", "207", "220", "223"]
 TRAIN_RECORDS = [r for r in DS1_RECORDS if r not in VAL_RECORDS]
 TEST_RECORDS = list(DS2_RECORDS)
 
+# Grouped cross-validation over DS1 (scripts/train_cv.py), patient-wise folds. 201 trains in every fold and is
+# never held out, so the pooled out-of-fold threshold never sees the 201/202 patient. Folds are balanced for
+# V and S beats (each has >= 575 V and >= 97 S); the LBBB records 109/207 and the RBBB records 118/124 are
+# in different folds. Fold 0 holds 209, which has 41% of DS1's S beats.
+CV_ALWAYS_TRAIN = ["201"]
+CV_FOLDS = [
+    ["209", "203", "215"],
+    ["207", "106", "112", "122"],
+    ["118", "119", "116", "205"],
+    ["220", "208", "230", "115", "114"],
+    ["223", "124", "109", "108", "101"],
+]
+
 # The record that dominated the baseline's INT8 false positives on the old split (artifacts/diagnosis.md).
 FOCUS_RECORD = "214"
 # Same patient as train record 201; test metrics are also reported without it.
