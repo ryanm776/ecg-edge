@@ -98,6 +98,12 @@ def test_counts_only_writes_section_1_and_loads_no_model(tmp_path, monkeypatch):
         assert totals.loc[split, "normal"] == (per_record["N"]) * len(records)
     ds_totals = pd.read_csv(tmp_path / "symbol_counts_by_dechazal_split.csv").set_index("dechazal_split")
     assert ds_totals.loc["DS1", "V"] == per_record["V"] * len(analyze.DS1_RECORDS)
+    # The CV folds' totals add up to DS1 minus 201, which is never held out.
+    folds = pd.read_csv(tmp_path / "symbol_counts_by_cv_fold.csv").set_index("cv_fold")
+    fold_rows = folds.loc[[f"fold{k}" for k in range(len(analyze.CV_FOLDS))]]
+    for col in ("V", "supraventricular", "normal"):
+        assert fold_rows[col].sum() == ds_totals.loc["DS1", col] - folds.loc["always_train", col]
+    assert folds.loc["always_train", "V"] == per_record["V"] * len(analyze.CV_ALWAYS_TRAIN)
 
     summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
     assert "## 1. Beat counts by annotation symbol" in summary

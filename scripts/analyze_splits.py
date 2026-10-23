@@ -39,7 +39,7 @@ from ecg.features import (  # noqa: E402  (numpy/scipy only)
     ABNORMAL_TYPES, SUPRAVENTRICULAR, VENTRICULAR, WINDOW_SIZE, type_recall,
 )
 from train import (  # noqa: E402  (numpy/pandas only)
-    DS1_RECORDS, DS2_RECORDS, TEST_RECORDS, TRAIN_RECORDS, VAL_RECORDS,
+    CV_ALWAYS_TRAIN, CV_FOLDS, DS1_RECORDS, DS2_RECORDS, TEST_RECORDS, TRAIN_RECORDS, VAL_RECORDS,
 )
 
 COUNT_SYMBOLS = ["N", "L", "R", "e", "j", "V", "E", "A", "a", "J", "S", "F", "Q"]
@@ -155,13 +155,16 @@ def symbol_counts(data_dir, include_dechazal):
     current = {**{r: "train" for r in TRAIN_RECORDS}, **{r: "val" for r in VAL_RECORDS},
                **{r: "test" for r in TEST_RECORDS}}
     dechazal = {**{r: "DS1" for r in DS1_RECORDS}, **{r: "DS2" for r in DS2_RECORDS}}
+    cv_fold = {**{r: f"fold{k}" for k, fold in enumerate(CV_FOLDS) for r in fold},
+               **{r: "always_train" for r in CV_ALWAYS_TRAIN}}
 
     rows = []
     for rec in records:
         record, annotation = data.load_record(rec, data_dir)
         counts = usable_symbol_counts(annotation.sample, annotation.symbol, record.sig_len)
         rows.append({"record_id": rec, "current_split": current.get(rec, "unused"),
-                     "dechazal_split": dechazal.get(rec, "—"), **{s: counts.get(s, 0) for s in COUNT_SYMBOLS}})
+                     "dechazal_split": dechazal.get(rec, "—"), "cv_fold": cv_fold.get(rec, "—"),
+                     **{s: counts.get(s, 0) for s in COUNT_SYMBOLS}})
     return add_group_columns(pd.DataFrame(rows))
 
 
@@ -231,7 +234,8 @@ def main():
     md += ["## 1. Beat counts by annotation symbol", "",
            "Usable beats (same window rule as the dataset; train is uncapped and unaugmented). "
            "F and Q are dropped by `SYMBOL_MAP`.", ""]
-    for split_col in ["current_split"] + ([] if args.no_dechazal else ["dechazal_split"]):
+    # cv_fold: grouped-CV folds over DS1 (scripts/train_cv.py); "—" rows are DS2.
+    for split_col in ["current_split"] + ([] if args.no_dechazal else ["dechazal_split", "cv_fold"]):
         totals = add_group_columns(counts.groupby(split_col)[COUNT_SYMBOLS].sum().reset_index())
         totals.to_csv(os.path.join(args.out_dir, f"symbol_counts_by_{split_col}.csv"), index=False)
         md += [f"### Totals by `{split_col}`", "", df_to_md(totals[[split_col] + total_cols + ["s_share_of_abnormal"]]), ""]
