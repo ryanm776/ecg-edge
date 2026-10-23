@@ -24,6 +24,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from ecg.features import type_recall  # noqa: E402  (numpy/scipy only)
+
 # de Chazal et al., IEEE TBME 2004 inter-patient split: DS1 = train + val, DS2 = test.
 # The paced records are excluded from both.
 PACED_RECORDS = ["102", "104", "107", "217"]
@@ -87,7 +89,7 @@ def parse_args():
     return args
 
 
-def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshold, float_threshold,
+def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, preds, threshold, float_threshold,
                     tflite_kb, levels, evaluate):
     """One row per (model, threshold source): float @ INT8-val threshold, float @ its own
     val threshold, and INT8 @ INT8-val threshold. Every column is computed from the row's
@@ -107,6 +109,7 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
         fp_focus = int(per_record.loc[per_record["record_id"] == FOCUS_RECORD, "fp"].sum())
         excl, _ = evaluate.evaluate_predictions(y_keep, np.asarray(test_probs)[keep], records_keep, t)
         (_, excl_fp), (excl_fn, _) = excl["confusion_matrix"]
+        by_type = type_recall(y_test, symbols_test, test_probs, t)
 
         t_recall = evaluate.threshold_at_recall(y_val, val_probs, args.target_recall)
         at_recall, _ = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t_recall)
@@ -114,6 +117,7 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
         return {
             "variant": label,
             "calib_samples": None if args.variant == "qat" else args.calib_samples,
+            "seed": args.seed,
             "model": model_name,
             "threshold_from": threshold_from,
             "threshold": t,
@@ -124,6 +128,8 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
             "tp": tp,
             "fp": fp,
             "fn": fn,
+            "recall_ventricular": by_type["ventricular"][2],
+            "recall_supraventricular": by_type["supraventricular"][2],
             f"fp_rec{FOCUS_RECORD}": fp_focus,
             f"fp_excl_{FOCUS_RECORD}": fp - fp_focus,
             "n_beats": overall["n_beats"],
@@ -171,8 +177,9 @@ def main():
     X_val_spec, X_val_rr, y_val, record_ids_val = data.build_dataset(
         VAL_RECORDS, args.data_dir, max_normal_per_record=None, augment=False, seed=args.seed,
     )
-    X_test_spec, X_test_rr, y_test, record_ids_test = data.build_dataset(
+    X_test_spec, X_test_rr, y_test, record_ids_test, symbols_test = data.build_dataset(
         TEST_RECORDS, args.data_dir, max_normal_per_record=None, augment=False, seed=args.seed,
+        return_symbols=True,
     )
     print(f"Train: {len(X_train_spec)} | Val: {len(X_val_spec)} | Test: {len(X_test_spec)}")
 
@@ -313,7 +320,7 @@ def main():
     per_record_combined.to_csv(os.path.join(args.artifacts_dir, "per_record_metrics.csv"), index=False)
 
     comparison_rows(
-        label, args, y_val, y_test, record_ids_test,
+        label, args, y_val, y_test, record_ids_test, symbols_test,
         {"float": (val_probs_float, float_sweep_df, test_probs_float),
          "int8": (val_probs_int8, sweep_df, test_probs_int8)},
         threshold, float_threshold, model_size_kb, levels, evaluate,

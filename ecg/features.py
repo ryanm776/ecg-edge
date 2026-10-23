@@ -14,8 +14,23 @@ SYMBOL_MAP = {
     "V": 1, "E": 1,
     "A": 1, "a": 1, "J": 1, "S": 1,
 }
+# The two kinds of Abnormal beat, for per-type reporting (the model itself is binary).
+VENTRICULAR = ("V", "E")
+SUPRAVENTRICULAR = ("A", "a", "J", "S")
+ABNORMAL_TYPES = {"ventricular": VENTRICULAR, "supraventricular": SUPRAVENTRICULAR}
 
 WINDOW_SIZE = 250
+
+
+def type_recall(y, symbols, probs, threshold):
+    """Recall of each abnormal type at a threshold: {type: (n, detected, recall)}."""
+    y, symbols, pred = np.asarray(y), np.asarray(symbols), np.asarray(probs) > threshold
+    out = {}
+    for name, syms in ABNORMAL_TYPES.items():
+        mask = (y == 1) & np.isin(symbols, syms)
+        n, detected = int(mask.sum()), int(pred[mask].sum())
+        out[name] = (n, detected, detected / n if n else float("nan"))
+    return out
 
 
 def bandpass_filter(raw_signal, fs, low=0.5, high=40.0):

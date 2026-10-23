@@ -35,15 +35,14 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from ecg.features import WINDOW_SIZE  # noqa: E402  (numpy/scipy only)
+from ecg.features import (  # noqa: E402  (numpy/scipy only)
+    ABNORMAL_TYPES, SUPRAVENTRICULAR, VENTRICULAR, WINDOW_SIZE, type_recall,
+)
 from train import (  # noqa: E402  (numpy/pandas only)
     DS1_RECORDS, DS2_RECORDS, TEST_RECORDS, TRAIN_RECORDS, VAL_RECORDS,
 )
 
 COUNT_SYMBOLS = ["N", "L", "R", "e", "j", "V", "E", "A", "a", "J", "S", "F", "Q"]
-VENTRICULAR = ("V", "E")
-SUPRAVENTRICULAR = ("A", "a", "J", "S")
-ABNORMAL_TYPES = {"ventricular": VENTRICULAR, "supraventricular": SUPRAVENTRICULAR}
 EXCLUDED_RECORD = "232"
 
 
@@ -109,17 +108,6 @@ def threshold_rows(variant_dir, has_int8):
     out = [("float", "int8_val", t_int8), ("float", "float_val", t_float)]
     if has_int8:
         out.append(("int8", "int8_val", t_int8))
-    return out
-
-
-def type_recall(y, symbols, probs, threshold):
-    """Recall of each abnormal type at a threshold: {type: (n, detected, recall)}."""
-    y, symbols, pred = np.asarray(y), np.asarray(symbols), np.asarray(probs) > threshold
-    out = {}
-    for name, syms in ABNORMAL_TYPES.items():
-        mask = (y == 1) & np.isin(symbols, syms)
-        n, detected = int(mask.sum()), int(pred[mask].sum())
-        out[name] = (n, detected, detected / n if n else float("nan"))
     return out
 
 

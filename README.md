@@ -34,10 +34,12 @@ To compare variants (float vs. INT8, each in its own process, never touching
 ```bash
 python scripts/compare_variants.py                          # baseline, bn_folded, qat
 python scripts/compare_variants.py --variants bn_folded --calib-samples 100 500 1000 5000
+python scripts/compare_variants.py --variants baseline bn_folded --seeds 42 43 44   # mean ± std over seeds
 ```
 
 Each run writes to `artifacts/dechazal/variants/<run>/`; all runs are aggregated into
-`artifacts/dechazal/variant_comparison.{csv,md}`. Every variant, baseline included, is trained
+`artifacts/dechazal/variant_comparison.{csv,md}` (per-run rows, plus mean ± std over seeds, also
+in `variant_comparison_seeds.csv`). Every variant, baseline included, is trained
 from scratch. `artifacts/variants/` and `artifacts/variant_comparison.*` are kept as the
 record of the old hand-picked split.
 

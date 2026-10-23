@@ -22,6 +22,7 @@ import glob
 import os
 import subprocess
 import sys
+import time
 
 import pandas as pd
 
@@ -30,17 +31,25 @@ TRAIN_SCRIPT = os.path.join(REPO_ROOT, "scripts", "train.py")
 VARIANTS = ["baseline", "bn_folded", "qat"]
 DEFAULT_CALIB_SAMPLES = 100  # train.py's --calib-samples default
 COLUMNS = [
-    "run", "variant", "calib_samples", "model", "threshold_from", "threshold", "val_f1",
-    "test_precision", "test_recall", "test_f1", "tp", "fp", "fn", "fp_rec214", "fp_excl_214",
+    "run", "variant", "calib_samples", "seed", "model", "threshold_from", "threshold", "val_f1",
+    "test_precision", "test_recall", "test_f1", "tp", "fp", "fn",
+    "recall_ventricular", "recall_supraventricular", "fp_rec214", "fp_excl_214",
     "f1_excl_202", "fp_excl_202", "fn_excl_202", "pr_auc_excl_202",
     "pr_auc", "roc_auc", "r95_threshold", "r95_test_precision", "r95_test_recall", "r95_fp",
     "tflite_kb", "min_int8_levels",
 ]
 FLOAT_COLUMNS_3DP = [
     "threshold", "val_f1", "test_precision", "test_recall", "test_f1",
+    "recall_ventricular", "recall_supraventricular",
     "f1_excl_202", "pr_auc_excl_202", "pr_auc", "roc_auc", "r95_test_precision", "r95_test_recall",
 ]
 FLOAT_COLUMNS_4DP = ["r95_threshold"]
+# Rows that differ only in seed are one configuration; these are averaged over its seeds.
+CONFIG_COLUMNS = ["variant", "calib_samples", "model", "threshold_from"]
+SEED_SUMMARY_COLUMNS = [
+    "pr_auc", "test_f1", "fp", "fn", "recall_ventricular", "recall_supraventricular",
+    "f1_excl_202", "fp_excl_202", "fn_excl_202", "pr_auc_excl_202", "threshold",
+]
 
 
 def parse_args():
@@ -58,55 +67,71 @@ def parse_args():
                         help="Reuse this saved baseline model instead of training it (must be from the same split).")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", nargs="+", type=int, default=[42],
+                        help="Train every variant once per seed (e.g. 42 43 44); tables report mean ± std.")
     parser.add_argument("--aggregate-only", action="store_true", help="Skip the runs; just rebuild the tables.")
     args = parser.parse_args()
 
     if args.normalize_rr and args.baseline_model:
         parser.error("--baseline-model was trained without R-R normalization; drop it with --normalize-rr")
+    if len(args.seeds) > 1 and (args.baseline_model or args.load_model):
+        parser.error("a saved model is one seed's training; it can't be reused across --seeds")
+    if len(set(args.seeds)) != len(args.seeds):
+        parser.error("--seeds has duplicates")
     return args
 
 
-def run_name(variant, normalize_rr, calib_samples):
+def run_name(variant, normalize_rr, calib_samples, seed):
     name = variant + ("_rr_norm" if normalize_rr else "")
     if calib_samples is not None and calib_samples != DEFAULT_CALIB_SAMPLES:
         name += f"_calib{calib_samples}"
-    return name
+    return name + f"_seed{seed}"
 
 
 def run_variants(args):
-    baseline_model = args.baseline_model
+    for seed in args.seeds:
+        for variant in args.variants:
+            run_variant(args, variant, seed)
 
-    for variant in args.variants:
-        sizes = [None] if variant == "qat" else args.calib_samples
-        trained_model = baseline_model if variant == "baseline" else (None if variant == "qat" else args.load_model)
 
-        for calib_samples in sizes:
-            out_dir = os.path.join(args.artifacts_dir, "variants", run_name(variant, args.normalize_rr, calib_samples))
-            cmd = [
-                sys.executable, TRAIN_SCRIPT,
-                "--variant", variant,
-                "--artifacts-dir", out_dir,
-                "--data-dir", args.data_dir,
-                "--epochs", str(args.epochs),
-                "--seed", str(args.seed),
-                "--no-firmware-export",
-            ]
-            if args.normalize_rr:
-                cmd.append("--normalize-rr")
-            if calib_samples is not None:
-                cmd += ["--calib-samples", str(calib_samples)]
-            if trained_model:
-                cmd += ["--load-model", trained_model]
+def run_variant(args, variant, seed):
+    sizes = [None] if variant == "qat" else args.calib_samples
+    trained_model = args.baseline_model if variant == "baseline" else (None if variant == "qat" else args.load_model)
 
-            env = dict(os.environ)
-            if variant == "qat":
-                env["TF_USE_LEGACY_KERAS"] = "1"
-            print(f"\n=== {out_dir} ===\n{' '.join(cmd)}", flush=True)
-            subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=True)
+    for calib_samples in sizes:
+        out_dir = os.path.join(args.artifacts_dir, "variants",
+                               run_name(variant, args.normalize_rr, calib_samples, seed))
+        cmd = train_command(args, variant, seed, calib_samples, trained_model, out_dir)
 
-            if trained_model is None and variant != "qat":
-                trained_model = os.path.join(out_dir, "ecg_multiscale_model.keras")
+        env = dict(os.environ)
+        if variant == "qat":
+            env["TF_USE_LEGACY_KERAS"] = "1"
+        print(f"\n=== {out_dir} ===\n{' '.join(cmd)}", flush=True)
+        start = time.monotonic()
+        subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=True)
+        print(f"=== {out_dir} finished in {(time.monotonic() - start) / 60:.1f} min ===", flush=True)
+
+        if trained_model is None and variant != "qat":
+            trained_model = os.path.join(out_dir, "ecg_multiscale_model.keras")
+
+
+def train_command(args, variant, seed, calib_samples, trained_model, out_dir):
+    cmd = [
+        sys.executable, TRAIN_SCRIPT,
+        "--variant", variant,
+        "--artifacts-dir", out_dir,
+        "--data-dir", args.data_dir,
+        "--epochs", str(args.epochs),
+        "--seed", str(seed),
+        "--no-firmware-export",
+    ]
+    if args.normalize_rr:
+        cmd.append("--normalize-rr")
+    if calib_samples is not None:
+        cmd += ["--calib-samples", str(calib_samples)]
+    if trained_model:
+        cmd += ["--load-model", trained_model]
+    return cmd
 
 
 def aggregate(artifacts_dir):
@@ -133,34 +158,73 @@ def aggregate(artifacts_dir):
         _calib=df["calib_samples"].fillna(-1),
         _model=df["model"].map({"float": 0, "int8": 1}),
         _from=df["threshold_from"].map({"int8_val": 0, "float_val": 1}),
-    ).sort_values(["_variant", "_rr_norm", "_calib", "_model", "_from"])
+    ).sort_values(["_variant", "_rr_norm", "_calib", "_model", "_from", "seed"])
     df = df[COLUMNS]
+    summary = seed_summary(df)
 
     csv_path = os.path.join(artifacts_dir, "variant_comparison.csv")
+    seeds_csv_path = os.path.join(artifacts_dir, "variant_comparison_seeds.csv")
     md_path = os.path.join(artifacts_dir, "variant_comparison.md")
     df.to_csv(csv_path, index=False)
+    summary.to_csv(seeds_csv_path, index=False)
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(to_markdown(df))
-    print(f"\nWrote {csv_path} and {md_path} ({len(frames)} runs).")
+        f.write(to_markdown(df, summary))
+    print(f"\nWrote {csv_path}, {seeds_csv_path} and {md_path} ({len(frames)} runs).")
     return df
 
 
-def to_markdown(df):
-    def fmt(col, value):
-        if pd.isna(value):
-            return "—"
-        if col in FLOAT_COLUMNS_3DP:
-            return f"{value:.3f}"
-        if col in FLOAT_COLUMNS_4DP:
-            return f"{value:.4f}"
-        if isinstance(value, float) and value.is_integer():
-            return str(int(value))
-        return str(value)
+def seed_summary(df):
+    """Mean and sample std (ddof=1; NaN with one seed) of SEED_SUMMARY_COLUMNS per configuration,
+    i.e. over the rows that differ only in seed. Keeps the per-run table's row order."""
+    groups = df.groupby(CONFIG_COLUMNS, dropna=False, sort=False)
+    out = groups["seed"].agg(n_seeds="count", seeds=lambda s: " ".join(str(int(v)) for v in sorted(s)))
+    for col in SEED_SUMMARY_COLUMNS:
+        out[f"{col}_mean"] = groups[col].mean()
+        out[f"{col}_std"] = groups[col].std(ddof=1)
+    return out.reset_index()
 
+
+def _fmt(col, value):
+    if pd.isna(value):
+        return "—"
+    if col in FLOAT_COLUMNS_3DP:
+        return f"{value:.3f}"
+    if col in FLOAT_COLUMNS_4DP:
+        return f"{value:.4f}"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _fmt_mean_std(col, mean, std):
+    if col in FLOAT_COLUMNS_3DP or col in FLOAT_COLUMNS_4DP:
+        return f"{_fmt(col, mean)} ± {_fmt(col, std)}"
+    # Counts (fp, fn, ...): one decimal so a non-integer mean isn't rounded away.
+    return f"{mean:.1f} ± {'—' if pd.isna(std) else f'{std:.1f}'}"
+
+
+def to_markdown(df, summary):
+    summary_cols = CONFIG_COLUMNS + ["n_seeds", "seeds"] + SEED_SUMMARY_COLUMNS
     lines = [
         "# Float vs. INT8 by variant",
         "",
-        "Test set, seed 42. `threshold_from`: `int8_val` is the threshold chosen on the INT8 model's",
+        "## Mean ± std over seeds",
+        "",
+        "Sample std (ddof=1) across the seeds listed; `—` with a single seed. `pr_auc` is on the full",
+        "test set; float and INT8 are separate rows.",
+        "",
+        "| " + " | ".join(summary_cols) + " |",
+        "|" + "|".join("---" for _ in summary_cols) + "|",
+    ]
+    for _, r in summary.iterrows():
+        cells = [_fmt(c, r[c]) for c in CONFIG_COLUMNS + ["n_seeds", "seeds"]]
+        cells += [_fmt_mean_std(c, r[f"{c}_mean"], r[f"{c}_std"]) for c in SEED_SUMMARY_COLUMNS]
+        lines.append("| " + " | ".join(cells) + " |")
+    lines += [
+        "",
+        "## Per run",
+        "",
+        "Test set, one row per run (seed in `seed`). `threshold_from`: `int8_val` is the threshold chosen on the INT8 model's",
         "validation predictions (the deployed convention); `float_val` is the float model's own",
         "val-optimal threshold. For `qat`, the float row is the float model before QAT fine-tuning.",
         "`val_f1` is the row's own model's validation F1 at the row's threshold.",
@@ -170,12 +234,13 @@ def to_markdown(df):
         "`min_int8_levels` is the smallest number of INT8 levels any intermediate tensor spans.",
         "`*_excl_202`: sensitivity check, test re-evaluated without record 202 (same patient as train",
         "record 201); reported alongside the full-test columns, not instead of them.",
+        "`recall_ventricular` (V, E) / `recall_supraventricular` (A, a, J, S): test recall per abnormal type.",
         "",
         "| " + " | ".join(df.columns) + " |",
         "|" + "|".join("---" for _ in df.columns) + "|",
     ]
     for _, r in df.iterrows():
-        lines.append("| " + " | ".join(fmt(c, r[c]) for c in df.columns) + " |")
+        lines.append("| " + " | ".join(_fmt(c, r[c]) for c in df.columns) + " |")
     return "\n".join(lines) + "\n"
 
 
