@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python scripts/train.py
 ```
 
-On first run this downloads the 38 MIT-BIH records used by the train/val/test splits into
+On first run this downloads the 44 MIT-BIH records used by the train/val/test splits into
 `data/mitdb/` (cached for subsequent runs), trains the model, converts it to INT8, selects a
 decision threshold from the **INT8 model's** validation predictions, and evaluates both the
 float and INT8 models on the full test set.
@@ -58,6 +58,44 @@ removes that cap so validation reflects the full MIT-BIH distribution — but `E
 (`monitor="val_loss"`) now sees a larger, differently-balanced validation set each epoch, so
 training may stop at a different epoch and results won't exactly match the original notebook run.
 
+### Data split
+
+The split is the de Chazal inter-patient split [10]. It replaced an earlier hand-picked split
+whose validation and test sets disagreed: validation abnormal beats were 94.4% supraventricular (S),
+test abnormal beats were 91.9% ventricular, and train had no LBBB beats (see `artifacts/diagnosis.md`).
+
+- **Test = DS2** (22 records), exactly as published, so results are comparable with the literature.
+- **Train + validation = DS1** (22 records). Validation is carved out by patient:
+  `115, 122, 207, 220, 223`. The other 17 DS1 records are train.
+- The four paced records (102, 104, 107, 217) are excluded, as in [10].
+
+Why these validation records:
+- **One LBBB record per side:** 109 in train, 207 in validation. DS1 has only these two LBBB patients.
+- **S and V beats:** 220 (94 A beats) and 223 (473 V, 73 A). Validation gets its S beats from these
+  records rather than from 201, 209 or 118, which stay in train.
+- **Normal volume:** 115 and 122 are normal-only, so validation false positives reflect a realistic
+  share of normal beats.
+- **201 stays in train:** 201 and 202 are the same patient, and 202 is in DS2. Keeping 201 out of
+  validation means threshold selection never sees a patient who is also in test.
+
+Usable beats per split (from `python scripts/analyze_splits.py --counts-only`):
+
+| split | beats | normal | ventricular (V, E) | supraventricular (A, a, J, S) | S share of abnormal |
+|---|---|---|---|---|---|
+| train | 39,645 | 35,870 | 3,105 | 670 | 0.177 |
+| val | 10,920 | 9,964 | 683 | 273 | 0.286 |
+| test (DS2) | 49,288 | 44,232 | 3,220 | 1,836 | 0.363 |
+
+Known limitations:
+- **207 is noisy.** It has SVTA and ventricular-flutter episodes and may dominate validation errors or
+  set the threshold. Check the per-record validation table before trusting a threshold.
+- **Few S beats in train:** 670, of which 383 are from record 209.
+- **Test S beats are mostly one patient's:** record 232 has 1,381 of DS2's 1,836 (75%).
+- **201/202 same-patient exception.** The published split puts the same patient in DS1 (201) and DS2
+  (202). It is kept for comparability, and documented in `scripts/train.py` and `tests/test_splits.py`.
+  `scripts/train.py` also reports test metrics without 202 (`*_excl_202` in `metrics.json` and
+  `variant_comparison.*`), alongside the full-DS2 numbers rather than instead of them.
+
 ## Testing
 
 ```bash
@@ -75,10 +113,15 @@ known deployment constraints).
 
 ## Future work
 
+- Grouped cross-validation over DS1. With only two LBBB patients and 943 S beats in DS1, any fixed
+  validation set is an estimate from one or two patients. Planned procedure:
+  - patient-grouped 5-fold CV on DS1
+  - threshold chosen from the pooled out-of-fold predictions; epoch count from the folds' best epochs
+  - one final model trained on all 22 DS1 records with those settings, evaluated once on DS2
+  - no ensembling, because of ESP32 compute and memory limits
 - Pan-Tompkins R-peak detection on device, replacing ground-truth annotations [7] (see CLAUDE.md deployment constraints)
 - Pruning for further model compression [9]
 - Tiered cloud data pipeline (edge buffering → Redis → PostgreSQL → object storage) for streaming results, following [8]
-- Switch to the standard de Chazal inter-patient split (DS1 train / DS2 test, validation carved patient-wise from DS1), motivated by the validation/test mismatch in artifacts/diagnosis.md [10]
 
 ## Related work
 
