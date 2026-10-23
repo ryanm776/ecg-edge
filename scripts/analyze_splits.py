@@ -5,7 +5,8 @@ Reports, written to <out-dir>/summary.md plus CSVs and a PNG:
   1. Beat counts by annotation symbol per split and per record (including F and Q, which
      the dataset drops), for the current split and the de Chazal DS1/DS2 split.
   2. Per-record metrics on val (and test, for comparison).
-  3. Validation F1 / PR-AUC with and without record 232.
+  3. Validation F1 / PR-AUC with and without record 232 (only while 232 is in val; under the
+     de Chazal split it is in test).
   4. Recall by abnormal type (ventricular V,E vs. supraventricular A,a,J,S) and per-type
      ROC-AUC / PR-AUC against normals, on val and test.
   5. Predicted-probability distribution of normal beats, val vs. test.
@@ -14,6 +15,10 @@ Threshold convention matches artifacts/variant_comparison.md: float models at bo
 INT8-val threshold and their own float-val threshold, INT8 at the INT8-val threshold.
 Baseline INT8 is left out on purpose: its behavior is dominated by the quantization bug
 (artifacts/diagnosis.md), not by the split.
+
+`--counts-only` writes section 1 and stops, without loading any model. Use it after a split
+change: models trained on another split may have seen the new val/test patients, so their
+metrics there are meaningless until they are retrained.
 """
 from __future__ import annotations
 
@@ -52,6 +57,8 @@ def parse_args():
     parser.add_argument("--bn-folded-dir", default=os.path.join("artifacts", "variants", "bn_folded"))
     parser.add_argument("--no-dechazal", action="store_true",
                         help="Skip DS1/DS2 symbol counts (needs records 116 117 122 207 228 234).")
+    parser.add_argument("--counts-only", action="store_true",
+                        help="Write only the beat counts by split (section 1); no models are loaded.")
     parser.add_argument("--reuse-predictions", action="store_true",
                         help="Load <out-dir>/predictions.npz instead of re-running the models.")
     parser.add_argument("--seed", type=int, default=42)
@@ -242,6 +249,9 @@ def main():
         totals.to_csv(os.path.join(args.out_dir, f"symbol_counts_by_{split_col}.csv"), index=False)
         md += [f"### Totals by `{split_col}`", "", df_to_md(totals[[split_col] + total_cols + ["s_share_of_abnormal"]]), ""]
     md += ["### Per record", "", df_to_md(counts), ""]
+    if args.counts_only:
+        write_summary(args.out_dir, md)
+        return
 
     # Predictions and threshold rows
     labels, preds = load_or_predict(args)
@@ -277,24 +287,28 @@ def main():
             md += [f"### {split}: {label}", "", df_to_md(sub[per_record_cols]), ""]
 
     # 3. Validation with and without record 232
-    y, record_ids, _ = labels["val"]
-    keep = excluding_record(record_ids, EXCLUDED_RECORD)
-    excl_rows = []
-    for variant, model, frm, t in rows:
-        probs = preds[f"{variant}/{model}"]["val"]
-        for subset, mask in (("all val", np.ones_like(keep)), (f"val excl. {EXCLUDED_RECORD}", keep)):
-            overall, _ = evaluate.evaluate_predictions(y[mask], probs[mask], record_ids[mask], t)
-            best_t, sweep = evaluate.select_threshold(y[mask], probs[mask])
-            excl_rows.append({"row": row_label(variant, model, frm, t), "subset": subset,
-                              "n_abnormal": int(y[mask].sum()), "f1_at_threshold": overall["f1"],
-                              "precision": overall["precision"], "recall": overall["recall"],
-                              "best_f1": float(sweep["f1"].max()), "best_threshold": best_t,
-                              "pr_auc": evaluate.ranking_metrics(y[mask], probs[mask])["pr_auc"]})
-    excl_df = pd.DataFrame(excl_rows)
-    excl_df.to_csv(os.path.join(args.out_dir, "val_excluding_232.csv"), index=False)
-    md += [f"## 3. Validation with and without record {EXCLUDED_RECORD}", "",
-           "`best_f1` / `best_threshold` sweep the subset itself; `pr_auc` is per model, independent of the row threshold.", "",
-           df_to_md(excl_df), ""]
+    if EXCLUDED_RECORD in VAL_RECORDS:
+        y, record_ids, _ = labels["val"]
+        keep = excluding_record(record_ids, EXCLUDED_RECORD)
+        excl_rows = []
+        for variant, model, frm, t in rows:
+            probs = preds[f"{variant}/{model}"]["val"]
+            for subset, mask in (("all val", np.ones_like(keep)), (f"val excl. {EXCLUDED_RECORD}", keep)):
+                overall, _ = evaluate.evaluate_predictions(y[mask], probs[mask], record_ids[mask], t)
+                best_t, sweep = evaluate.select_threshold(y[mask], probs[mask])
+                excl_rows.append({"row": row_label(variant, model, frm, t), "subset": subset,
+                                  "n_abnormal": int(y[mask].sum()), "f1_at_threshold": overall["f1"],
+                                  "precision": overall["precision"], "recall": overall["recall"],
+                                  "best_f1": float(sweep["f1"].max()), "best_threshold": best_t,
+                                  "pr_auc": evaluate.ranking_metrics(y[mask], probs[mask])["pr_auc"]})
+        excl_df = pd.DataFrame(excl_rows)
+        excl_df.to_csv(os.path.join(args.out_dir, "val_excluding_232.csv"), index=False)
+        md += [f"## 3. Validation with and without record {EXCLUDED_RECORD}", "",
+               "`best_f1` / `best_threshold` sweep the subset itself; `pr_auc` is per model, independent of the row threshold.", "",
+               df_to_md(excl_df), ""]
+    else:
+        md += [f"## 3. Validation with and without record {EXCLUDED_RECORD}", "",
+               f"Skipped: record {EXCLUDED_RECORD} is not in the validation set.", ""]
 
     # 4. Recall by abnormal type + per-type ranking metrics
     type_rows, type_record_rows, type_auc_rows = [], [], []
@@ -349,10 +363,14 @@ def main():
            df_to_md(prob_df, floatfmt="{:.4f}"), "", "### Per record", "",
            df_to_md(prob_record_df, floatfmt="{:.4f}"), "", "![normal-beat histograms](normal_prob_hist.png)", ""]
 
-    with open(os.path.join(args.out_dir, "summary.md"), "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
-    print(f"\nWrote {args.out_dir}/summary.md")
+    write_summary(args.out_dir, md)
     print(df_to_md(overall_df[overall_df["split"] == "test"]))
+
+
+def write_summary(out_dir, md):
+    with open(os.path.join(out_dir, "summary.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(md))
+    print(f"\nWrote {out_dir}/summary.md")
 
 
 def plot_normal_histograms(labels, preds, path):
