@@ -2,10 +2,14 @@
 """Run scripts/train.py once per variant and aggregate the float vs. INT8 comparison.
 
 Each run is a separate process (Keras 3 and tf_keras, which QAT needs, can't share one)
-writing to <artifacts-dir>/variants/<run>/ with --no-firmware-export. The baseline is
-re-evaluated from its saved model, not retrained. Every run found under
+writing to <artifacts-dir>/variants/<run>/ with --no-firmware-export. Every run found under
 <artifacts-dir>/variants/ (this invocation's and earlier ones) is aggregated into
 <artifacts-dir>/variant_comparison.{csv,md}.
+
+<artifacts-dir> defaults to artifacts/dechazal (the de Chazal split). artifacts/variants/ and
+artifacts/variant_comparison.* are the record of the old hand-picked split; don't write there.
+Every variant, baseline included, is trained unless a saved model is passed explicitly; a
+saved model must have been trained on the same split, or val/test patients leak into training.
 
 With several --calib-samples sizes, each PTQ variant is trained once (on the first size)
 and the saved float model is re-converted for the remaining sizes. QAT needs no
@@ -46,18 +50,20 @@ def parse_args():
     parser.add_argument("--calib-samples", nargs="+", type=int, default=[DEFAULT_CALIB_SAMPLES],
                         help="PTQ calibration-set sizes to evaluate (e.g. 100 500 1000 5000).")
     parser.add_argument("--load-model", default=None,
-                        help="Reuse this saved float model for the PTQ (non-baseline) variants instead of training.")
-    parser.add_argument("--artifacts-dir", default="artifacts")
+                        help="Reuse this saved float model for the PTQ (non-baseline) variants instead of training "
+                             "(must be from the same split).")
+    parser.add_argument("--artifacts-dir", default=os.path.join("artifacts", "dechazal"),
+                        help="Default: artifacts/dechazal. artifacts/ itself holds the old-split record.")
     parser.add_argument("--baseline-model", default=None,
-                        help="Saved baseline model (default: <artifacts-dir>/ecg_multiscale_model.keras).")
+                        help="Reuse this saved baseline model instead of training it (must be from the same split).")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--aggregate-only", action="store_true", help="Skip the runs; just rebuild the tables.")
     args = parser.parse_args()
 
-    if args.normalize_rr and "baseline" in args.variants:
-        parser.error("the saved baseline model was trained without R-R normalization; drop baseline from --variants")
+    if args.normalize_rr and args.baseline_model:
+        parser.error("--baseline-model was trained without R-R normalization; drop it with --normalize-rr")
     return args
 
 
@@ -69,7 +75,7 @@ def run_name(variant, normalize_rr, calib_samples):
 
 
 def run_variants(args):
-    baseline_model = args.baseline_model or os.path.join(args.artifacts_dir, "ecg_multiscale_model.keras")
+    baseline_model = args.baseline_model
 
     for variant in args.variants:
         sizes = [None] if variant == "qat" else args.calib_samples

@@ -36,8 +36,10 @@ python scripts/compare_variants.py                          # baseline, bn_folde
 python scripts/compare_variants.py --variants bn_folded --calib-samples 100 500 1000 5000
 ```
 
-Each run writes to `artifacts/variants/<run>/`; all runs are aggregated into
-`artifacts/variant_comparison.{csv,md}`.
+Each run writes to `artifacts/dechazal/variants/<run>/`; all runs are aggregated into
+`artifacts/dechazal/variant_comparison.{csv,md}`. Every variant, baseline included, is trained
+from scratch. `artifacts/variants/` and `artifacts/variant_comparison.*` are kept as the
+record of the old hand-picked split.
 
 ### Outputs
 

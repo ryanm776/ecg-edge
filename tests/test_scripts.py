@@ -42,10 +42,18 @@ def test_train_rejects_unsupported_combinations(monkeypatch, argv):
 
 def test_compare_rejects_rr_norm_with_saved_baseline(monkeypatch):
     with pytest.raises(SystemExit):
-        _parse(compare_variants, monkeypatch, "--normalize-rr")
+        _parse(compare_variants, monkeypatch, "--normalize-rr", "--baseline-model", "m.keras")
     args = _parse(compare_variants, monkeypatch, "--variants", "bn_folded", "--normalize-rr",
                   "--calib-samples", "100", "500", "1000", "5000")
     assert args.calib_samples == [100, 500, 1000, 5000]
+
+
+def test_compare_defaults_to_dechazal_dir_and_trains_baseline(monkeypatch):
+    # artifacts/ holds the old-split record; the saved baseline there was trained on the old
+    # split, so reusing it on the new one would leak val/test patients.
+    args = _parse(compare_variants, monkeypatch)
+    assert Path(args.artifacts_dir) == Path("artifacts") / "dechazal"
+    assert args.baseline_model is None
 
 
 def test_run_name():

@@ -10,6 +10,7 @@ logs/
 
 # Per-run comparison and analysis outputs (regenerable; findings go in artifacts/diagnosis.md)
 artifacts/variants/
+artifacts/dechazal/variants/
 artifacts/split_analysis/
 
 # Editor settings

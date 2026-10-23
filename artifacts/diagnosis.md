@@ -1,5 +1,7 @@
 # Float → INT8 gap: diagnosis
 
+> **Old split.** Every result in this file, and every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …), uses the old hand-picked train/val/test split. Results on the de Chazal split go in `artifacts/dechazal/` (see README.md, "Data split").
+
 Baseline model (`ecg_multiscale_model.keras` / `model_int8.tflite`, seed 42) on test, threshold 0.35:
 
 | Model | Precision | Recall | FP | FP rec 214 | FP excl. 214 |
