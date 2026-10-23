@@ -216,3 +216,34 @@ def test_comparison_rows_use_each_models_own_val_sweep():
         assert row_["recall_ventricular"] == pred[symbols == "V"].mean()
         assert row_["recall_supraventricular"] == pred[symbols == "A"].mean()
         assert row_["seed"] == 43
+
+
+def test_val_per_record_rows_reconcile_with_overall_val_metrics():
+    import numpy as np
+
+    from ecg import evaluate
+
+    rng = np.random.default_rng(1)
+    y_val = np.array(([0] * 30 + [1] * 10) * 3)
+    record_ids = np.repeat(np.array(["207", "220", "223"], dtype=object), 40)
+    preds = {name: (rng.uniform(0.0, 1.0, len(y_val)), None, None) for name in ("float", "int8")}
+
+    df = train.val_per_record_rows(y_val, record_ids, preds, threshold=0.5, float_threshold=0.3,
+                                   evaluate=evaluate)
+
+    rows = df[["model", "threshold_from", "threshold"]].drop_duplicates().values.tolist()
+    assert rows == [["float", "int8_val", 0.5], ["float", "float_val", 0.3], ["int8", "int8_val", 0.5]]
+    for (model, _, t), group in df.groupby(["model", "threshold_from", "threshold"]):
+        probs = preds[model][0]
+        assert sorted(group["record_id"]) == ["207", "220", "223"]
+        # Per-record counts sum to the overall val confusion matrix at the row's threshold...
+        overall, _ = evaluate.evaluate_predictions(y_val, probs, record_ids, t)
+        (tn, fp), (fn, tp) = overall["confusion_matrix"]
+        assert (group["tp"].sum(), group["fp"].sum(), group["fn"].sum(), group["tn"].sum()) == (tp, fp, fn, tn)
+        assert group["n_beats"].sum() == len(y_val)
+        # ...and each record's row equals metrics computed on that record's beats alone.
+        for _, r in group.iterrows():
+            mask = record_ids == r["record_id"]
+            alone, _ = evaluate.evaluate_predictions(y_val[mask], probs[mask], record_ids[mask], t)
+            assert r["f1"] == alone["f1"]
+            assert (r["fp"], r["fn"]) == (alone["confusion_matrix"][0][1], alone["confusion_matrix"][1][0])

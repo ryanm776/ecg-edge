@@ -53,6 +53,9 @@ record of the old hand-picked split.
   float and INT8 models, plus the INT8 model size in KB.
 - `artifacts/per_record_metrics.csv` — per-record breakdown (beats, TP/FP/FN/TN,
   precision/recall/F1) for both models.
+- `artifacts/val_per_record_metrics.csv` — the same breakdown on validation, for each
+  (model, threshold source) row of the comparison table, to see which validation records drive
+  the errors and the threshold choice.
 - `deployment_model/model_data.h`, `deployment_model/threshold.h` — what the firmware links against.
 
 ### Caveat: validation set changed

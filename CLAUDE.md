@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 An ECG heartbeat classifier (Normal vs. Abnormal) trained on the MIT-BIH Arrhythmia Database, quantized to INT8, and deployed for on-device inference on an ESP32-S3 via TensorFlow Lite Micro. The project has three stages that live in three different places:
 
 1. **Training** — the `ecg/` package + `scripts/train.py`, runs locally. (`train_pipeline.ipynb` is the original Colab notebook this was extracted from; it's superseded and kept only as a Colab-runnable reference — see the note at the top of the notebook.)
-2. **Generated artifacts** — `artifacts/ecg_multiscale_model.keras`, `artifacts/model_int8.tflite`, `artifacts/threshold.json`, `artifacts/metrics.json`, `artifacts/per_record_metrics.csv`, `deployment_model/model_data.h`, `deployment_model/threshold.h` — all produced by `scripts/train.py`. Not sources of truth; regenerate rather than hand-edit.
+2. **Generated artifacts** — `artifacts/ecg_multiscale_model.keras`, `artifacts/model_int8.tflite`, `artifacts/threshold.json`, `artifacts/metrics.json`, `artifacts/per_record_metrics.csv`, `artifacts/val_per_record_metrics.csv`, `deployment_model/model_data.h`, `deployment_model/threshold.h` — all produced by `scripts/train.py`. Not sources of truth; regenerate rather than hand-edit.
 3. **Firmware** — `deployment_model/deployment_model.ino`, an Arduino sketch for the ESP32-S3 that loads `model_data.h` + `threshold.h` and runs inference.
 
 ## Commands

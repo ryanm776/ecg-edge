@@ -147,11 +147,28 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, p
             "min_int8_levels": levels if is_int8 else None,
         }
 
-    return pd.DataFrame([
-        row("float", "int8_val", threshold),
-        row("float", "float_val", float_threshold),
-        row("int8", "int8_val", threshold),
-    ])
+    return pd.DataFrame([row(*spec) for spec in row_specs(threshold, float_threshold)])
+
+
+def row_specs(threshold, float_threshold):
+    """(model, threshold_from, threshold) for each reported row, shared by the test and val tables."""
+    return [
+        ("float", "int8_val", threshold),
+        ("float", "float_val", float_threshold),
+        ("int8", "int8_val", threshold),
+    ]
+
+
+def val_per_record_rows(y_val, record_ids_val, preds, threshold, float_threshold, evaluate):
+    """Per-record validation metrics for the same rows as comparison_rows, so the val-side
+    error sources (e.g. how much of val FP/FN one record contributes) can be reviewed directly.
+    `preds` is comparison_rows' mapping; only the val probabilities are used.
+    """
+    tables = []
+    for model_name, threshold_from, t in row_specs(threshold, float_threshold):
+        _, per_record = evaluate.evaluate_predictions(y_val, preds[model_name][0], record_ids_val, t)
+        tables.append(per_record.assign(model=model_name, threshold_from=threshold_from, threshold=t))
+    return pd.concat(tables, ignore_index=True)
 
 
 def main():
@@ -319,12 +336,15 @@ def main():
     ], ignore_index=True)
     per_record_combined.to_csv(os.path.join(args.artifacts_dir, "per_record_metrics.csv"), index=False)
 
+    preds = {"float": (val_probs_float, float_sweep_df, test_probs_float),
+             "int8": (val_probs_int8, sweep_df, test_probs_int8)}
     comparison_rows(
-        label, args, y_val, y_test, record_ids_test, symbols_test,
-        {"float": (val_probs_float, float_sweep_df, test_probs_float),
-         "int8": (val_probs_int8, sweep_df, test_probs_int8)},
+        label, args, y_val, y_test, record_ids_test, symbols_test, preds,
         threshold, float_threshold, model_size_kb, levels, evaluate,
     ).to_csv(os.path.join(args.artifacts_dir, "comparison_rows.csv"), index=False)
+    val_per_record_rows(
+        y_val, record_ids_val, preds, threshold, float_threshold, evaluate,
+    ).to_csv(os.path.join(args.artifacts_dir, "val_per_record_metrics.csv"), index=False)
 
     if args.no_firmware_export:
         print(f"\nWrote artifacts to {args.artifacts_dir}/ (firmware headers not written).")
