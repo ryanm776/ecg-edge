@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -40,7 +41,7 @@ COLUMNS = [
 ]
 FLOAT_COLUMNS_3DP = [
     "threshold", "val_f1", "test_precision", "test_recall", "test_f1",
-    "recall_ventricular", "recall_supraventricular",
+    "recall_ventricular", "recall_supraventricular", "se_V", "pp_V", "se_S", "pp_S",
     "f1_excl_202", "pr_auc_excl_202", "pr_auc", "roc_auc", "r95_test_precision", "r95_test_recall",
 ]
 FLOAT_COLUMNS_4DP = ["r95_threshold"]
@@ -50,6 +51,37 @@ SEED_SUMMARY_COLUMNS = [
     "pr_auc", "test_f1", "fp", "fn", "recall_ventricular", "recall_supraventricular",
     "f1_excl_202", "fp_excl_202", "fn_excl_202", "pr_auc_excl_202", "threshold",
 ]
+
+
+@dataclass(frozen=True)
+class Table:
+    """One aggregated comparison: runs under <artifacts_dir>/<subdir>/*/comparison_rows.csv are written to
+    <artifacts_dir>/<name>.{csv,md} and <name>_seeds.csv."""
+    subdir: str
+    name: str
+    title: str
+    columns: list
+    summary_columns: list
+    notes: list = field(default_factory=list)
+
+
+VARIANT_TABLE = Table(
+    subdir="variants", name="variant_comparison", title="Float vs. INT8 by variant",
+    columns=COLUMNS, summary_columns=SEED_SUMMARY_COLUMNS,
+    notes=[
+        "Test set, one row per run (seed in `seed`). `threshold_from`: `int8_val` is the threshold chosen on the INT8 model's",
+        "validation predictions (the deployed convention); `float_val` is the float model's own",
+        "val-optimal threshold. For `qat`, the float row is the float model before QAT fine-tuning.",
+        "`val_f1` is the row's own model's validation F1 at the row's threshold.",
+        "Threshold-independent columns: `pr_auc` (average precision) and `roc_auc` on test, and the",
+        "fixed-recall operating point `r95_*`: the highest threshold reaching >= 0.95 recall on the",
+        "model's own validation predictions, then test precision / recall / FP at that threshold.",
+        "`min_int8_levels` is the smallest number of INT8 levels any intermediate tensor spans.",
+        "`*_excl_202`: sensitivity check, test re-evaluated without record 202 (same patient as train",
+        "record 201); reported alongside the full-test columns, not instead of them.",
+        "`recall_ventricular` (V, E) / `recall_supraventricular` (A, a, J, S): test recall per abnormal type.",
+    ],
+)
 
 
 def parse_args():
@@ -134,21 +166,22 @@ def train_command(args, variant, seed, calib_samples, trained_model, out_dir):
     return cmd
 
 
-def aggregate(artifacts_dir):
-    paths = sorted(glob.glob(os.path.join(artifacts_dir, "variants", "*", "comparison_rows.csv")))
+def aggregate(artifacts_dir, table=VARIANT_TABLE):
+    runs_dir = os.path.join(artifacts_dir, table.subdir)
+    paths = sorted(glob.glob(os.path.join(runs_dir, "*", "comparison_rows.csv")))
     if not paths:
-        raise SystemExit(f"No runs found under {artifacts_dir}/variants/")
+        raise SystemExit(f"No runs found under {runs_dir}/")
     frames = []
     for p in paths:
         run = os.path.basename(os.path.dirname(p))
         frame = pd.read_csv(p, dtype={"variant": str}).assign(run=run)
-        missing = [c for c in COLUMNS if c not in frame.columns]
+        missing = [c for c in table.columns if c not in frame.columns]
         if missing:
             print(f"Skipping {run}: written by an older train.py (missing {', '.join(missing)}); re-run it to include it.")
             continue
         frames.append(frame)
     if not frames:
-        raise SystemExit(f"No up-to-date runs found under {artifacts_dir}/variants/")
+        raise SystemExit(f"No up-to-date runs found under {runs_dir}/")
     df = pd.concat(frames, ignore_index=True)
 
     base = df["variant"].str.split("+").str[0]
@@ -159,26 +192,26 @@ def aggregate(artifacts_dir):
         _model=df["model"].map({"float": 0, "int8": 1}),
         _from=df["threshold_from"].map({"int8_val": 0, "float_val": 1}),
     ).sort_values(["_variant", "_rr_norm", "_calib", "_model", "_from", "seed"])
-    df = df[COLUMNS]
-    summary = seed_summary(df)
+    df = df[table.columns]
+    summary = seed_summary(df, table.summary_columns)
 
-    csv_path = os.path.join(artifacts_dir, "variant_comparison.csv")
-    seeds_csv_path = os.path.join(artifacts_dir, "variant_comparison_seeds.csv")
-    md_path = os.path.join(artifacts_dir, "variant_comparison.md")
+    csv_path = os.path.join(artifacts_dir, f"{table.name}.csv")
+    seeds_csv_path = os.path.join(artifacts_dir, f"{table.name}_seeds.csv")
+    md_path = os.path.join(artifacts_dir, f"{table.name}.md")
     df.to_csv(csv_path, index=False)
     summary.to_csv(seeds_csv_path, index=False)
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(to_markdown(df, summary))
+        f.write(to_markdown(df, summary, table))
     print(f"\nWrote {csv_path}, {seeds_csv_path} and {md_path} ({len(frames)} runs).")
     return df
 
 
-def seed_summary(df):
-    """Mean and sample std (ddof=1; NaN with one seed) of SEED_SUMMARY_COLUMNS per configuration,
+def seed_summary(df, summary_columns=SEED_SUMMARY_COLUMNS):
+    """Mean and sample std (ddof=1; NaN with one seed) of `summary_columns` per configuration,
     i.e. over the rows that differ only in seed. Keeps the per-run table's row order."""
     groups = df.groupby(CONFIG_COLUMNS, dropna=False, sort=False)
     out = groups["seed"].agg(n_seeds="count", seeds=lambda s: " ".join(str(int(v)) for v in sorted(s)))
-    for col in SEED_SUMMARY_COLUMNS:
+    for col in summary_columns:
         out[f"{col}_mean"] = groups[col].mean()
         out[f"{col}_std"] = groups[col].std(ddof=1)
     return out.reset_index()
@@ -203,10 +236,10 @@ def _fmt_mean_std(col, mean, std):
     return f"{mean:.1f} ± {'—' if pd.isna(std) else f'{std:.1f}'}"
 
 
-def to_markdown(df, summary):
-    summary_cols = CONFIG_COLUMNS + ["n_seeds", "seeds"] + SEED_SUMMARY_COLUMNS
+def to_markdown(df, summary, table=VARIANT_TABLE):
+    summary_cols = CONFIG_COLUMNS + ["n_seeds", "seeds"] + table.summary_columns
     lines = [
-        "# Float vs. INT8 by variant",
+        f"# {table.title}",
         "",
         "## Mean ± std over seeds",
         "",
@@ -218,23 +251,13 @@ def to_markdown(df, summary):
     ]
     for _, r in summary.iterrows():
         cells = [_fmt(c, r[c]) for c in CONFIG_COLUMNS + ["n_seeds", "seeds"]]
-        cells += [_fmt_mean_std(c, r[f"{c}_mean"], r[f"{c}_std"]) for c in SEED_SUMMARY_COLUMNS]
+        cells += [_fmt_mean_std(c, r[f"{c}_mean"], r[f"{c}_std"]) for c in table.summary_columns]
         lines.append("| " + " | ".join(cells) + " |")
     lines += [
         "",
         "## Per run",
         "",
-        "Test set, one row per run (seed in `seed`). `threshold_from`: `int8_val` is the threshold chosen on the INT8 model's",
-        "validation predictions (the deployed convention); `float_val` is the float model's own",
-        "val-optimal threshold. For `qat`, the float row is the float model before QAT fine-tuning.",
-        "`val_f1` is the row's own model's validation F1 at the row's threshold.",
-        "Threshold-independent columns: `pr_auc` (average precision) and `roc_auc` on test, and the",
-        "fixed-recall operating point `r95_*`: the highest threshold reaching >= 0.95 recall on the",
-        "model's own validation predictions, then test precision / recall / FP at that threshold.",
-        "`min_int8_levels` is the smallest number of INT8 levels any intermediate tensor spans.",
-        "`*_excl_202`: sensitivity check, test re-evaluated without record 202 (same patient as train",
-        "record 201); reported alongside the full-test columns, not instead of them.",
-        "`recall_ventricular` (V, E) / `recall_supraventricular` (A, a, J, S): test recall per abnormal type.",
+        *table.notes,
         "",
         "| " + " | ".join(df.columns) + " |",
         "|" + "|".join("---" for _ in df.columns) + "|",
