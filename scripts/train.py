@@ -102,6 +102,33 @@ def parse_args():
     return args
 
 
+EARLY_STOP_PATIENCE = 12
+
+
+def build_model(variant, spec_shape, tf, ecg_model):
+    """The float model for a variant (qat starts from the bn_folded architecture)."""
+    if variant == "baseline":
+        return ecg_model.build_multiscale_ptq_model(spec_shape)
+    return ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras)
+
+
+def fit_model(m, tf, ecg_model, x_train, y_train, validation_data, lr, epochs, batch_size):
+    """Compile with focal loss and fit. With `validation_data`, early-stop on val_loss (best weights
+    restored) and return the best epoch (1-based); without it, train all `epochs` and return `epochs`.
+    """
+    m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+              loss=ecg_model.focal_loss(gamma=2.0, alpha=0.25), metrics=["accuracy"])
+    callbacks = []
+    if validation_data is not None:
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=EARLY_STOP_PATIENCE, restore_best_weights=True))
+    history = m.fit(x=x_train, y=y_train, validation_data=validation_data, epochs=epochs,
+                    batch_size=batch_size, callbacks=callbacks)
+    if validation_data is None:
+        return epochs
+    return int(np.argmin(history.history["val_loss"])) + 1
+
+
 def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, preds, threshold, float_threshold,
                     tflite_kb, levels, evaluate):
     """One row per (model, threshold source): float @ INT8-val threshold, float @ its own
@@ -224,29 +251,16 @@ def main():
             json.dump({"mean": rr_mean.tolist(), "std": rr_std.tolist()}, f, indent=2)
         print(f"R-R normalizer (train): mean={rr_mean.round(4).tolist()} std={rr_std.round(4).tolist()}")
 
-    loss = ecg_model.focal_loss(gamma=2.0, alpha=0.25)
-
     def fit(m, lr, epochs):
-        m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr), loss=loss, metrics=["accuracy"])
-        early_stop_cb = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=12, restore_best_weights=True)
-        m.fit(
-            x=[X_train_spec, X_train_rr],
-            y=y_train,
-            validation_data=([X_val_spec, X_val_rr], y_val),
-            epochs=epochs,
-            batch_size=args.batch_size,
-            callbacks=[early_stop_cb],
-        )
+        fit_model(m, tf, ecg_model, [X_train_spec, X_train_rr], y_train, ([X_val_spec, X_val_rr], y_val),
+                  lr, epochs, args.batch_size)
 
     spec_shape = X_train_spec.shape[1:]
     if args.load_model:
         print(f"\nLoading saved float model {args.load_model} (no training)...")
         model = tf.keras.models.load_model(args.load_model, compile=False)
     else:
-        if args.variant == "baseline":
-            model = ecg_model.build_multiscale_ptq_model(spec_shape)
-        else:
-            model = ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras)
+        model = build_model(args.variant, spec_shape, tf, ecg_model)
         model.summary()
         print("\nTraining (float)...")
         fit(model, 0.001, args.epochs)

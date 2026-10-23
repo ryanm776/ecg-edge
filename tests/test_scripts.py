@@ -218,6 +218,46 @@ def test_comparison_rows_use_each_models_own_val_sweep():
         assert row_["seed"] == 43
 
 
+def _fake_fit_env(val_loss):
+    from types import SimpleNamespace
+
+    calls = {}
+
+    class Model:
+        def compile(self, **kw):
+            calls["compile"] = kw
+
+        def fit(self, **kw):
+            calls["fit"] = kw
+            return SimpleNamespace(history={"val_loss": val_loss})
+
+    keras = SimpleNamespace(
+        optimizers=SimpleNamespace(Adam=lambda learning_rate: ("adam", learning_rate)),
+        callbacks=SimpleNamespace(EarlyStopping=lambda **kw: ("early_stop", kw)),
+    )
+    ecg_model = SimpleNamespace(focal_loss=lambda gamma, alpha: ("focal", gamma, alpha))
+    return Model(), SimpleNamespace(keras=keras), ecg_model, calls
+
+
+def test_fit_model_returns_best_epoch_with_early_stopping():
+    model, tf, ecg_model, calls = _fake_fit_env([0.5, 0.3, 0.4, 0.35])
+
+    best = train.fit_model(model, tf, ecg_model, "x", "y", ("xv", "yv"), lr=0.001, epochs=100, batch_size=64)
+
+    assert best == 2
+    assert calls["compile"]["loss"] == ("focal", 2.0, 0.25)
+    (_, es), = calls["fit"]["callbacks"]
+    assert es == {"monitor": "val_loss", "patience": 12, "restore_best_weights": True}
+    assert calls["fit"]["epochs"] == 100 and calls["fit"]["validation_data"] == ("xv", "yv")
+
+
+def test_fit_model_without_validation_trains_all_epochs():
+    model, tf, ecg_model, calls = _fake_fit_env([])
+
+    assert train.fit_model(model, tf, ecg_model, "x", "y", None, lr=0.001, epochs=23, batch_size=64) == 23
+    assert calls["fit"]["callbacks"] == [] and calls["fit"]["validation_data"] is None
+
+
 def test_val_per_record_rows_reconcile_with_overall_val_metrics():
     import numpy as np
 
