@@ -31,22 +31,14 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from ecg.features import WINDOW_SIZE  # noqa: E402  (numpy/scipy only)
-from train import TEST_RECORDS, TRAIN_RECORDS, VAL_RECORDS  # noqa: E402  (numpy/pandas only)
+from train import (  # noqa: E402  (numpy/pandas only)
+    DS1_RECORDS, DS2_RECORDS, TEST_RECORDS, TRAIN_RECORDS, VAL_RECORDS,
+)
 
 COUNT_SYMBOLS = ["N", "L", "R", "e", "j", "V", "E", "A", "a", "J", "S", "F", "Q"]
 VENTRICULAR = ("V", "E")
 SUPRAVENTRICULAR = ("A", "a", "J", "S")
 ABNORMAL_TYPES = {"ventricular": VENTRICULAR, "supraventricular": SUPRAVENTRICULAR}
-
-# de Chazal et al., IEEE TBME 2004 inter-patient split (paced records 102/104/107/217 excluded).
-DS1_RECORDS = [
-    "101", "106", "108", "109", "112", "114", "115", "116", "118", "119", "122",
-    "124", "201", "203", "205", "207", "208", "209", "215", "220", "223", "230",
-]
-DS2_RECORDS = [
-    "100", "103", "105", "111", "113", "117", "121", "123", "200", "202", "210",
-    "212", "213", "214", "219", "221", "222", "228", "231", "232", "233", "234",
-]
 EXCLUDED_RECORD = "232"
 
 

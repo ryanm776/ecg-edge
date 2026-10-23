@@ -24,16 +24,32 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TRAIN_RECORDS = [
-    "101", "106", "108", "112", "114", "115", "118", "119", "200", "201",
-    "203", "205", "208", "209", "210", "212", "213", "215", "219", "221",
-    "222", "223",
+# de Chazal et al., IEEE TBME 2004 inter-patient split: DS1 = train + val, DS2 = test.
+# The paced records are excluded from both.
+PACED_RECORDS = ["102", "104", "107", "217"]
+DS1_RECORDS = [
+    "101", "106", "108", "109", "112", "114", "115", "116", "118", "119", "122",
+    "124", "201", "203", "205", "207", "208", "209", "215", "220", "223", "230",
 ]
-VAL_RECORDS = ["103", "109", "111", "124", "220", "230", "231", "232"]
-TEST_RECORDS = ["100", "105", "113", "121", "123", "202", "214", "233"]
+DS2_RECORDS = [
+    "100", "103", "105", "111", "113", "117", "121", "123", "200", "202", "210",
+    "212", "213", "214", "219", "221", "222", "228", "231", "232", "233", "234",
+]
+# Records 201 and 202 are the same patient, but the published split puts them in DS1 and DS2.
+# Kept for comparability; 201 stays in train (never val) and test is also reported without 202.
+SAME_PATIENT_EXCEPTIONS = [("201", "202")]
 
-# The record that dominates the baseline's INT8 false positives (artifacts/diagnosis.md).
+# Validation, carved patient-wise from DS1 (rationale in README.md, "Data split"):
+# 207 is the one LBBB record (109 stays in train), 220/223 carry S and V beats,
+# 115/122 are normal-only and give realistic normal volume.
+VAL_RECORDS = ["115", "122", "207", "220", "223"]
+TRAIN_RECORDS = [r for r in DS1_RECORDS if r not in VAL_RECORDS]
+TEST_RECORDS = list(DS2_RECORDS)
+
+# The record that dominated the baseline's INT8 false positives on the old split (artifacts/diagnosis.md).
 FOCUS_RECORD = "214"
+# Same patient as train record 201; test metrics are also reported without it.
+OVERLAP_RECORD = "202"
 # Test beats sampled for the min_int8_levels diagnostic.
 LEVELS_SAMPLE_SIZE = 1000
 
