@@ -18,13 +18,14 @@ pip install -r requirements.txt
 python scripts/train.py
 ```
 
-On first run this downloads the 38 MIT-BIH records used by the train/val/test splits into
+On first run this downloads the 44 MIT-BIH records used by the train/val/test splits into
 `data/mitdb/` (cached for subsequent runs), trains the model, converts it to INT8, selects a
 decision threshold from the **INT8 model's** validation predictions, and evaluates both the
 float and INT8 models on the full test set.
 
 Useful flags: `--epochs`, `--batch-size`, `--threshold-strategy {f1,recall_at_precision}`,
-`--min-precision` (for `recall_at_precision`), `--seed`, `--variant {baseline,bn_folded,qat}`,
+`--min-precision` (for `recall_at_precision`), `--seed`, `--variant {bn_folded,baseline,qat}`
+(default `bn_folded`; `baseline` is kept only to reproduce earlier results),
 `--calib-samples` (PTQ calibration-set size, default 100), `--normalize-rr`,
 `--no-firmware-export`. Run `python scripts/train.py --help` for the full list.
 
@@ -32,12 +33,17 @@ To compare variants (float vs. INT8, each in its own process, never touching
 `deployment_model/`):
 
 ```bash
-python scripts/compare_variants.py                          # baseline, bn_folded, qat
+python scripts/compare_variants.py                          # bn_folded (the default)
+python scripts/compare_variants.py --variants bn_folded qat # name other variants explicitly
 python scripts/compare_variants.py --variants bn_folded --calib-samples 100 500 1000 5000
+python scripts/compare_variants.py --variants baseline bn_folded --seeds 42 43 44   # mean ± std over seeds
 ```
 
-Each run writes to `artifacts/variants/<run>/`; all runs are aggregated into
-`artifacts/variant_comparison.{csv,md}`.
+Each run writes to `artifacts/dechazal/variants/<run>/`; all runs are aggregated into
+`artifacts/dechazal/variant_comparison.{csv,md}` (per-run rows, plus mean ± std over seeds, also
+in `variant_comparison_seeds.csv`). Every variant, baseline included, is trained
+from scratch. `artifacts/variants/` and `artifacts/variant_comparison.*` are kept as the
+record of the old hand-picked split.
 
 ### Outputs
 
@@ -49,6 +55,9 @@ Each run writes to `artifacts/variants/<run>/`; all runs are aggregated into
   float and INT8 models, plus the INT8 model size in KB.
 - `artifacts/per_record_metrics.csv` — per-record breakdown (beats, TP/FP/FN/TN,
   precision/recall/F1) for both models.
+- `artifacts/val_per_record_metrics.csv` — the same breakdown on validation, for each
+  (model, threshold source) row of the comparison table, to see which validation records drive
+  the errors and the threshold choice.
 - `deployment_model/model_data.h`, `deployment_model/threshold.h` — what the firmware links against.
 
 ### Caveat: validation set changed
@@ -57,6 +66,98 @@ The original notebook capped normal beats on the validation set to 600/record. T
 removes that cap so validation reflects the full MIT-BIH distribution — but `EarlyStopping`
 (`monitor="val_loss"`) now sees a larger, differently-balanced validation set each epoch, so
 training may stop at a different epoch and results won't exactly match the original notebook run.
+
+### Data split
+
+The split is the de Chazal inter-patient split [10]. It replaced an earlier hand-picked split
+whose validation and test sets disagreed: validation abnormal beats were 94.4% supraventricular (S),
+test abnormal beats were 91.9% ventricular, and train had no LBBB beats (see `artifacts/diagnosis.md`).
+
+- **Test = DS2** (22 records), exactly as published, so results are comparable with the literature.
+- **Train + validation = DS1** (22 records). Validation is carved out by patient:
+  `115, 122, 207, 220, 223`. The other 17 DS1 records are train.
+- The four paced records (102, 104, 107, 217) are excluded, as in [10].
+
+Why these validation records:
+- **One LBBB record per side:** 109 in train, 207 in validation. DS1 has only these two LBBB patients.
+- **S and V beats:** 220 (94 A beats) and 223 (473 V, 73 A). Validation gets its S beats from these
+  records rather than from 201, 209 or 118, which stay in train.
+- **Normal volume:** 115 and 122 are normal-only, so validation false positives reflect a realistic
+  share of normal beats.
+- **201 stays in train:** 201 and 202 are the same patient, and 202 is in DS2. Keeping 201 out of
+  validation means threshold selection never sees a patient who is also in test.
+
+Usable beats per split (from `python scripts/analyze_splits.py --counts-only`):
+
+| split | beats | normal | ventricular (V, E) | supraventricular (A, a, J, S) | S share of abnormal |
+|---|---|---|---|---|---|
+| train | 39,645 | 35,870 | 3,105 | 670 | 0.177 |
+| val | 10,920 | 9,964 | 683 | 273 | 0.286 |
+| test (DS2) | 49,288 | 44,232 | 3,220 | 1,836 | 0.363 |
+
+Known limitations:
+- **207 is noisy.** It has SVTA and ventricular-flutter episodes and may dominate validation errors or
+  set the threshold. Check the per-record validation table before trusting a threshold.
+- **Few S beats in train:** 670, of which 383 are from record 209.
+- **Test S beats are mostly one patient's:** record 232 has 1,381 of DS2's 1,836 (75%).
+- **201/202 same-patient exception.** The published split puts the same patient in DS1 (201) and DS2
+  (202). It is kept for comparability, and documented in `scripts/train.py` and `tests/test_splits.py`.
+  `scripts/train.py` also reports test metrics without 202 (`*_excl_202` in `metrics.json` and
+  `variant_comparison.*`), alongside the full-DS2 numbers rather than instead of them.
+
+### Grouped cross-validation
+
+```bash
+python scripts/train_cv.py --seeds 42 43 44     # bn_folded only
+```
+
+A fixed 5-record validation set gives an unstable operating point: across seeds 42–44, bn_folded's
+DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split results").
+`scripts/train_cv.py` instead picks the threshold and the epoch count from patient-grouped CV over DS1:
+
+1. **5 folds** (`CV_FOLDS` in `scripts/train.py`). Each fold model trains on DS1 minus the fold and
+   early-stops on the held-out fold, is converted to INT8, and scores the held-out fold.
+2. **Threshold** is selected on the pooled out-of-fold INT8 scores from 21 DS1 records. Scores go
+   through `evaluate.abnormal_score`: P(abnormal) for binary output, 1 − P(N) for multiclass.
+3. **Final model** trains on all 22 DS1 records for the median of the folds' best epochs, with no
+   early stopping and no ensembling (ESP32 limits). It is evaluated once on DS2 at that threshold.
+
+Results go in `artifacts/dechazal/cv_comparison.{csv,md}`. Per-run files are in
+`artifacts/dechazal/cv/<variant>_seed<S>/`: `folds.json`, `oof_per_record_metrics.csv`, and the usual
+metrics. `folds.json` also has a diagnostic DS2 evaluation of each fold model. It shows fold-to-fold
+spread and whether the final model is in line with the fold models; it is never used for any choice.
+
+Folds (from `python scripts/analyze_splits.py --counts-only`):
+
+| fold | records | beats | V (V, E) | S (A, a, J, S) | bundle branch block |
+|---|---|---|---|---|---|
+| 0 | 209, 203, 215 | 9,337 | 609 | 388 | — |
+| 1 | 207, 106, 112, 122 | 8,895 | 730 | 108 | LBBB 207 |
+| 2 | 118, 119, 116, 205 | 9,317 | 640 | 100 | RBBB 118 |
+| 3 | 220, 208, 230, 115, 114 | 10,705 | 1,036 | 108 | — |
+| 4 | 223, 124, 109, 108, 101 | 10,351 | 575 | 111 | LBBB 109, RBBB 124 |
+| always train | 201 | 1,960 | 198 | 128 | — |
+
+- **201 is never held out.** It trains in every fold and in the final model, so the pooled-OOF
+  threshold never sees the 201/202 patient.
+- The two LBBB records (109, 207) are in different folds, and so are the two RBBB records (118, 124).
+
+Caveats:
+- **Early stopping on the held-out fold** also scores that fold, so the OOF estimate is slightly
+  optimistic. This is standard non-nested CV.
+- **Fold models vs. final model:** the threshold is chosen on fold models trained on ~80% of DS1
+  and applied to a final model trained on 100%, so the final model's score distribution may shift
+  slightly. The fold-model DS2 diagnostic in `folds.json` shows how much.
+- **Fold 0 holds record 209,** which has 41% of DS1's S beats. Fold 0's model therefore trains with
+  few S beats: 555 of 943, including 201's 128.
+
+**AAMI-style per-class metrics.** The CV tables report sensitivity (`se_V`, `se_S`) and positive
+predictivity (`pp_V`, `pp_S`) for the V class (V, E) and the S class (A, a, J, S) on DS2, alongside
+the binary metrics.
+- For a binary model, +P is undefined, because an "abnormal" prediction names neither S nor V. It
+  shows `—`, and it is filled in once a multiclass model exists.
+- F and Q beats are dropped by the dataset (DS2 has 388 F beats), so class totals differ from papers
+  that keep F.
 
 ## Testing
 
@@ -78,7 +179,6 @@ known deployment constraints).
 - Pan-Tompkins R-peak detection on device, replacing ground-truth annotations [7] (see CLAUDE.md deployment constraints)
 - Pruning for further model compression [9]
 - Tiered cloud data pipeline (edge buffering → Redis → PostgreSQL → object storage) for streaming results, following [8]
-- Switch to the standard de Chazal inter-patient split (DS1 train / DS2 test, validation carved patient-wise from DS1), motivated by the validation/test mismatch in artifacts/diagnosis.md [10]
 
 ## Related work
 

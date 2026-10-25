@@ -1,5 +1,7 @@
 # Float → INT8 gap: diagnosis
 
+> **Old split.** Every result in this file except the final section, "de Chazal split results", and every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …), uses the old hand-picked train/val/test split. Results on the de Chazal split go in `artifacts/dechazal/` (see README.md, "Data split").
+
 Baseline model (`ecg_multiscale_model.keras` / `model_int8.tflite`, seed 42) on test, threshold 0.35:
 
 | Model | Precision | Recall | FP | FP rec 214 | FP excl. 214 |
@@ -287,3 +289,71 @@ The missing records are 116, 122 and 207 (DS1), and 117, 228 and 234 (DS2). Reru
 3. Run 2 (R-R normalization)
 4. Run 3 (calibration sweep)
 5. `analyze_splits.py` on the new split, to confirm val and test now agree on type composition
+
+## de Chazal split results
+
+Baseline and bn_folded trained on the de Chazal split (test = DS2, val = 115, 122, 207, 220, 223), seeds 42, 43, 44.
+Full tables: `artifacts/dechazal/variant_comparison.md`. Mean ± std uses ddof=1. Thresholds are picked on INT8 validation.
+
+| Variant | Float PR-AUC | INT8 PR-AUC | INT8 test F1 | INT8 FP | INT8 FN | INT8 V recall | INT8 S recall |
+|---|---|---|---|---|---|---|---|
+| baseline | 0.771 ± 0.111 | 0.676 ± 0.042 | 0.609 ± 0.022 | 2,156 ± 845 | 1,910 ± 221 | 0.825 ± 0.061 | 0.267 ± 0.125 |
+| bn_folded | 0.771 ± 0.010 | 0.766 ± 0.007 | 0.636 ± 0.108 | 3,665 ± 3,630 | 1,208 ± 529 | 0.950 ± 0.044 | 0.430 ± 0.218 |
+
+**bn_folded is the architecture going forward.**
+- **The INT8 fix holds on DS2.** Going from float to INT8, bn_folded loses 0.005 PR-AUC; the baseline loses 0.095.
+- **The old-split float gap was a single-seed artifact.** The old split had a float PR-AUC gap of 0.961 (baseline) vs 0.893 (bn_folded), measured only at seed 42. On DS2 both variants average 0.771. Baseline float is highly seed-sensitive (0.654, 0.876, 0.782), while bn_folded matches its average with about 10× less variance. Conv → BN → ReLU6 costs no float accuracy, makes training far more stable, and closes the INT8 gap.
+- **Excluding record 202 is negligible.** It changes F1 by at most 0.007 in every row.
+
+**Record 207 does not dominate validation.** Per-record validation, INT8 at each run's threshold:
+
+| Run | Threshold | Val FP | From 207 | Val FN | From 207 | From 223 | Threshold without 207 |
+|---|---|---|---|---|---|---|---|
+| baseline 42 | 0.50 | 108 | 90 | 256 | 16 | 185 | 0.45 |
+| baseline 43 | 0.70 | 455 | 426 | 278 | 80 | 164 | 0.65 |
+| baseline 44 | 0.55 | 96 | 92 | 384 | 120 | 215 | 0.30 |
+| bn_folded 42 | 0.15 | 108 | 54 | 124 | 14 | 99 | 0.15 |
+| bn_folded 43 | 0.25 | 80 | 26 | 234 | 21 | 195 | 0.25 |
+| bn_folded 44 | 0.30 | 103 | 84 | 224 | 13 | 187 | 0.25 |
+
+- 207 is the largest validation false-positive source, but the totals are small, except in baseline seed 43 (426 of 455).
+- For bn_folded, 207 is among the best-classified validation records (F1 0.86–0.93). Leaving it out moves the selected threshold by at most one 0.05 step.
+- Validation false negatives come mostly from record 223's missed V beats.
+
+**Threshold instability is the main remaining issue.**
+- bn_folded's INT8 PR-AUC varies little across seeds (± 0.007), but its test F1 (± 0.108) and FP (± 3,630) vary a lot. Most of that spread comes from the selected threshold.
+- Seed 42 picks 0.15, which gives 108 false positives on validation and 7,849 on test.
+- Five validation records don't pin down an operating point that transfers to DS2. Grouped CV over DS1 is next.
+
+**Test error sources (INT8):**
+- **False negatives:** record 232 dominates every run, with 553–1,276 of its 1,381 abnormal beats missed. It holds 75% of DS2's S beats, so S recall (0.27–0.43) is largely record 232's recall. The next FN sources are 233, 228 and 200.
+- **False positives:** 222 is among the top four FP sources in every run (551–1,103). The others are 212, 213, 111 and 214. In bn_folded seed 42, 212 contributes 1,780 and 213 contributes 1,643. Record 105 contributes about 130–220 per run.
+- **Unverified hypothesis:** test contains normal morphologies absent from validation: 222, 212 (RBBB), 111 and 214 (LBBB). That may explain why validation false positives don't predict test false positives.
+
+## Grouped CV results
+
+bn_folded, patient-grouped 5-fold CV over DS1 (`scripts/train_cv.py`), seeds 42, 43, 44. The threshold is picked on pooled out-of-fold (OOF) INT8 scores. The final model trains on all 22 DS1 records for the median of the folds' best epochs and is evaluated once on DS2. Full tables: `artifacts/dechazal/cv_comparison.md`. Mean ± std uses ddof=1.
+
+| Setup | INT8 PR-AUC | INT8 test F1 | INT8 FP | INT8 FN | se_V | se_S | Threshold |
+|---|---|---|---|---|---|---|---|
+| fixed val (above) | 0.766 ± 0.007 | 0.636 ± 0.108 | 3,665 ± 3,630 | 1,208 ± 529 | 0.950 ± 0.044 | 0.430 ± 0.218 | 0.15 / 0.25 / 0.30 |
+| grouped CV | 0.748 ± 0.011 | 0.690 ± 0.036 | 1,366 ± 598 | 1,681 ± 177 | 0.881 ± 0.107 | 0.293 ± 0.101 | 0.50 / 0.50 / 0.50 |
+
+**CV fixes the threshold instability.**
+- All three seeds pick 0.50. It is a real peak, not a flat curve: pooled-OOF INT8 F1 is 0.737 / 0.716 / 0.741 at 0.50 and drops 0.001–0.017 one step away (0.45, 0.55). Only 1.8–2.0% of OOF scores fall in [0.45, 0.55].
+- Test F1 std drops from 0.108 to 0.036 and FP std from 3,630 to 598. The cost is more FNs (1,681 vs 1,208) and lower V and S sensitivity.
+- PR-AUC is 0.018 lower than the fixed-val runs. The final model has no early stopping on a validation set, and its epoch count varies (28 / 16 / 26). The fold best epochs range from 5 to 56. Seed 43 (16 epochs) has the lowest PR-AUC (0.740), but three seeds can't separate an epoch effect from seed noise.
+- Excluding record 202 changes F1 by at most 0.002.
+
+**DS2 results depend strongly on which patients are in training.** Each fold model is trained on about 4/5 of DS1. On DS2 (diagnostic only, never used for a choice), fold models span PR-AUC 0.548–0.870, F1 0.463–0.750, FP 74–862 and FN 1,749–3,510. The final models (0.740–0.761) sit inside that range.
+
+**S beats from unseen patients are almost never detected.**
+- Pooled OOF S recall over DS1 (815 S beats, 201 excluded) is 0.108 / 0.080 / 0.093 (88 / 65 / 76 detected).
+- Record 209 (383 A beats) is the largest OOF FN source in every seed: 369 / 369 / 378 of its 384 abnormal beats are missed. 207, 223 and 215 follow.
+- Per fold, OOF S recall is 0.000–0.310, with one outlier at 0.667 (seed 42, fold 3: 220/208/230/115/114).
+- This weakens the record-232 hypothesis. If 232 were the only problem, held-out DS1 S beats would be detected. Record 232's DS2 A-beat recall varies by seed (710 / 247 / 158 of 1,381 detected), and so does the S recall on the remaining 455 DS2 S beats: 0.086 / 0.488 / 0.523. The excl-232 figures are derived as se_S × 1,836 minus 232's TP, assuming all 232 abnormal beats are S. The record-232 diagnosis should compute them directly.
+
+**Test error sources (final INT8 model):**
+- **False negatives:** 232 contributes 671 / 1,134 / 1,223 (36% / 75% / 73% of FNs). Next are 228 (276 of 365, seed 42 only), 233, 222 and 200 (80–104 of 856).
+- **False positives:** 222 is a top-three source in every seed: 203 / 712 / 491 (8.9% / 31.3% / 21.6% of its normal beats). LBBB records also contribute: 214 (282 / 412 in seeds 42 and 43) and 111 (10 / 330 / 121). In seed 42, record 212 (RBBB) is the largest source at 684 (54%). Record 105 contributes 57–122.
+- **OOF false positives** come from 203, 114, 230, 215 and 208. None of these are bundle-branch-block records, so OOF FPs still don't predict the DS2 sources (222, 212, 214, 111).

@@ -1,7 +1,9 @@
 """Pure helpers of scripts/analyze_splits.py (no data, no network, no models)."""
 import importlib.util
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -61,6 +63,52 @@ def test_type_recall_and_type_vs_normal_subset():
     assert recall["supraventricular"] == (3, 1, pytest.approx(1 / 3))
     v_mask = analyze.type_vs_normal_subset(y, symbols, "ventricular")
     assert v_mask.tolist() == [True, True, True, True, False, False, False]
+
+
+def test_counts_only_writes_section_1_and_loads_no_model(tmp_path, monkeypatch):
+    from ecg import data
+
+    signal, _, samples, symbols = _synthetic_record()
+    loaded = []
+
+    def fake_load_record(rec, data_dir):
+        loaded.append(rec)
+        return SimpleNamespace(sig_len=len(signal)), SimpleNamespace(sample=samples, symbol=symbols)
+
+    def no_models(*args, **kwargs):
+        raise AssertionError("--counts-only must not load predictions or models")
+
+    monkeypatch.setattr(data, "ensure_mitdb_cached", lambda data_dir, records: None)
+    monkeypatch.setattr(data, "load_record", fake_load_record)
+    monkeypatch.setattr(analyze, "load_or_predict", no_models)
+    monkeypatch.setattr(sys, "argv", ["analyze_splits", "--counts-only", "--out-dir", str(tmp_path)])
+
+    analyze.main()
+
+    # Every split record and every DS1/DS2 record is counted, each exactly once.
+    all_records = set(analyze.TRAIN_RECORDS + analyze.VAL_RECORDS + analyze.TEST_RECORDS
+                      + analyze.DS1_RECORDS + analyze.DS2_RECORDS)
+    assert sorted(loaded) == sorted(all_records)
+
+    per_record = analyze.usable_symbol_counts(samples, symbols, len(signal))
+    totals = pd.read_csv(tmp_path / "symbol_counts_by_current_split.csv").set_index("current_split")
+    for split, records in [("train", analyze.TRAIN_RECORDS), ("val", analyze.VAL_RECORDS),
+                           ("test", analyze.TEST_RECORDS)]:
+        assert totals.loc[split, "V"] == per_record["V"] * len(records)
+        assert totals.loc[split, "normal"] == (per_record["N"]) * len(records)
+    ds_totals = pd.read_csv(tmp_path / "symbol_counts_by_dechazal_split.csv").set_index("dechazal_split")
+    assert ds_totals.loc["DS1", "V"] == per_record["V"] * len(analyze.DS1_RECORDS)
+    # The CV folds' totals add up to DS1 minus 201, which is never held out.
+    folds = pd.read_csv(tmp_path / "symbol_counts_by_cv_fold.csv").set_index("cv_fold")
+    fold_rows = folds.loc[[f"fold{k}" for k in range(len(analyze.CV_FOLDS))]]
+    for col in ("V", "supraventricular", "normal"):
+        assert fold_rows[col].sum() == ds_totals.loc["DS1", col] - folds.loc["always_train", col]
+    assert folds.loc["always_train", "V"] == per_record["V"] * len(analyze.CV_ALWAYS_TRAIN)
+
+    summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "## 1. Beat counts by annotation symbol" in summary
+    assert "## Overall metrics" not in summary and "## 2." not in summary
+    assert not (tmp_path / "predictions.npz").exists()
 
 
 def test_excluding_record_and_normal_prob_summary():

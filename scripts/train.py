@@ -7,8 +7,8 @@ from the INT8 model's validation predictions, evaluates both the float and INT8
 models on the full test set (overall + per-record), and writes all artifacts.
 
 `--variant` picks the architecture/quantization path (see artifacts/diagnosis.md):
-  baseline   build_multiscale_ptq_model + PTQ (the current deployed model)
-  bn_folded  build_multiscale_bn_folded_model + PTQ
+  bn_folded  build_multiscale_bn_folded_model + PTQ (the default; the architecture going forward)
+  baseline   build_multiscale_ptq_model + PTQ (retired from new experiments; kept for reproducibility)
   qat        build_multiscale_bn_folded_model, trained float, then QAT fine-tuned.
              Runs under tf_keras (TF_USE_LEGACY_KERAS=1, set below before TF is imported).
 """
@@ -24,16 +24,47 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TRAIN_RECORDS = [
-    "101", "106", "108", "112", "114", "115", "118", "119", "200", "201",
-    "203", "205", "208", "209", "210", "212", "213", "215", "219", "221",
-    "222", "223",
-]
-VAL_RECORDS = ["103", "109", "111", "124", "220", "230", "231", "232"]
-TEST_RECORDS = ["100", "105", "113", "121", "123", "202", "214", "233"]
+from ecg.features import aami_class_metrics, type_recall  # noqa: E402  (numpy/scipy only)
 
-# The record that dominates the baseline's INT8 false positives (artifacts/diagnosis.md).
+# de Chazal et al., IEEE TBME 2004 inter-patient split: DS1 = train + val, DS2 = test.
+# The paced records are excluded from both.
+PACED_RECORDS = ["102", "104", "107", "217"]
+DS1_RECORDS = [
+    "101", "106", "108", "109", "112", "114", "115", "116", "118", "119", "122",
+    "124", "201", "203", "205", "207", "208", "209", "215", "220", "223", "230",
+]
+DS2_RECORDS = [
+    "100", "103", "105", "111", "113", "117", "121", "123", "200", "202", "210",
+    "212", "213", "214", "219", "221", "222", "228", "231", "232", "233", "234",
+]
+# Records 201 and 202 are the same patient, but the published split puts them in DS1 and DS2.
+# Kept for comparability; 201 stays in train (never val) and test is also reported without 202.
+SAME_PATIENT_EXCEPTIONS = [("201", "202")]
+
+# Validation, carved patient-wise from DS1 (rationale in README.md, "Data split"):
+# 207 is the one LBBB record (109 stays in train), 220/223 carry S and V beats,
+# 115/122 are normal-only and give realistic normal volume.
+VAL_RECORDS = ["115", "122", "207", "220", "223"]
+TRAIN_RECORDS = [r for r in DS1_RECORDS if r not in VAL_RECORDS]
+TEST_RECORDS = list(DS2_RECORDS)
+
+# Grouped cross-validation over DS1 (scripts/train_cv.py), patient-wise folds. 201 trains in every fold and is
+# never held out, so the pooled out-of-fold threshold never sees the 201/202 patient. Folds are balanced for
+# V and S beats (each has >= 575 V and >= 100 S); the LBBB records 109/207 and the RBBB records 118/124 are
+# in different folds. Fold 0 holds 209, which has 41% of DS1's S beats.
+CV_ALWAYS_TRAIN = ["201"]
+CV_FOLDS = [
+    ["209", "203", "215"],
+    ["207", "106", "112", "122"],
+    ["118", "119", "116", "205"],
+    ["220", "208", "230", "115", "114"],
+    ["223", "124", "109", "108", "101"],
+]
+
+# The record that dominated the baseline's INT8 false positives on the old split (artifacts/diagnosis.md).
 FOCUS_RECORD = "214"
+# Same patient as train record 201; test metrics are also reported without it.
+OVERLAP_RECORD = "202"
 # Test beats sampled for the min_int8_levels diagnostic.
 LEVELS_SAMPLE_SIZE = 1000
 
@@ -43,7 +74,7 @@ def parse_args():
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--artifacts-dir", default="artifacts")
     parser.add_argument("--deployment-dir", default="deployment_model")
-    parser.add_argument("--variant", choices=["baseline", "bn_folded", "qat"], default="baseline")
+    parser.add_argument("--variant", choices=["baseline", "bn_folded", "qat"], default="bn_folded")
     parser.add_argument("--normalize-rr", action="store_true",
                         help="Standardize the R-R features with train-set mean/std (saved to rr_norm.json).")
     parser.add_argument("--no-firmware-export", action="store_true",
@@ -71,20 +102,55 @@ def parse_args():
     return args
 
 
-def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshold, float_threshold,
+EARLY_STOP_PATIENCE = 12
+
+
+def build_model(variant, spec_shape, tf, ecg_model):
+    """The float model for a variant (qat starts from the bn_folded architecture)."""
+    if variant == "baseline":
+        return ecg_model.build_multiscale_ptq_model(spec_shape)
+    return ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras)
+
+
+def fit_model(m, tf, ecg_model, x_train, y_train, validation_data, lr, epochs, batch_size):
+    """Compile with focal loss and fit. With `validation_data`, early-stop on val_loss (best weights
+    restored) and return the best epoch (1-based); without it, train all `epochs` and return `epochs`.
+    """
+    m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+              loss=ecg_model.focal_loss(gamma=2.0, alpha=0.25), metrics=["accuracy"])
+    callbacks = []
+    if validation_data is not None:
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=EARLY_STOP_PATIENCE, restore_best_weights=True))
+    history = m.fit(x=x_train, y=y_train, validation_data=validation_data, epochs=epochs,
+                    batch_size=batch_size, callbacks=callbacks)
+    if validation_data is None:
+        return epochs
+    return int(np.argmin(history.history["val_loss"])) + 1
+
+
+def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, preds, threshold, float_threshold,
                     tflite_kb, levels, evaluate):
     """One row per (model, threshold source): float @ INT8-val threshold, float @ its own
     val threshold, and INT8 @ INT8-val threshold. Every column is computed from the row's
     own model: `val_f1` from that model's val sweep, PR/ROC-AUC from its test probabilities,
     and the fixed-recall operating point from its own val predictions.
 
-    `preds` maps "float"/"int8" to (val_probs, val_sweep, test_probs).
+    `preds` maps "float"/"int8" to (val_probs, val_sweep, test_probs). The `*_excl_<OVERLAP_RECORD>`
+    columns re-evaluate test without the record whose patient is also in train.
     """
+    keep = np.asarray(record_ids_test) != OVERLAP_RECORD
+    y_keep, records_keep = np.asarray(y_test)[keep], np.asarray(record_ids_test)[keep]
+
     def row(model_name, threshold_from, t):
         val_probs, val_sweep, test_probs = preds[model_name]
         overall, per_record = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t)
         (_, fp), (fn, tp) = overall["confusion_matrix"]
         fp_focus = int(per_record.loc[per_record["record_id"] == FOCUS_RECORD, "fp"].sum())
+        excl, _ = evaluate.evaluate_predictions(y_keep, np.asarray(test_probs)[keep], records_keep, t)
+        (_, excl_fp), (excl_fn, _) = excl["confusion_matrix"]
+        by_type = type_recall(y_test, symbols_test, test_probs, t)
+        aami = aami_class_metrics(symbols_test, abnormal_pred=np.asarray(test_probs) > t)
 
         t_recall = evaluate.threshold_at_recall(y_val, val_probs, args.target_recall)
         at_recall, _ = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t_recall)
@@ -92,6 +158,7 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
         return {
             "variant": label,
             "calib_samples": None if args.variant == "qat" else args.calib_samples,
+            "seed": args.seed,
             "model": model_name,
             "threshold_from": threshold_from,
             "threshold": t,
@@ -102,8 +169,21 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
             "tp": tp,
             "fp": fp,
             "fn": fn,
+            "recall_ventricular": by_type["ventricular"][2],
+            "recall_supraventricular": by_type["supraventricular"][2],
+            # AAMI-style Se / +P; +P is NaN for a binary model (see aami_class_metrics).
+            "se_V": aami["V"][1],
+            "pp_V": aami["V"][2],
+            "se_S": aami["S"][1],
+            "pp_S": aami["S"][2],
             f"fp_rec{FOCUS_RECORD}": fp_focus,
             f"fp_excl_{FOCUS_RECORD}": fp - fp_focus,
+            "n_beats": overall["n_beats"],
+            f"n_beats_excl_{OVERLAP_RECORD}": excl["n_beats"],
+            f"f1_excl_{OVERLAP_RECORD}": excl["f1"],
+            f"fp_excl_{OVERLAP_RECORD}": excl_fp,
+            f"fn_excl_{OVERLAP_RECORD}": excl_fn,
+            f"pr_auc_excl_{OVERLAP_RECORD}": evaluate.ranking_metrics(y_keep, np.asarray(test_probs)[keep])["pr_auc"],
             **evaluate.ranking_metrics(y_test, test_probs),
             "r95_threshold": t_recall,
             "r95_test_precision": at_recall["precision"],
@@ -113,11 +193,28 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, preds, threshol
             "min_int8_levels": levels if is_int8 else None,
         }
 
-    return pd.DataFrame([
-        row("float", "int8_val", threshold),
-        row("float", "float_val", float_threshold),
-        row("int8", "int8_val", threshold),
-    ])
+    return pd.DataFrame([row(*spec) for spec in row_specs(threshold, float_threshold)])
+
+
+def row_specs(threshold, float_threshold):
+    """(model, threshold_from, threshold) for each reported row, shared by the test and val tables."""
+    return [
+        ("float", "int8_val", threshold),
+        ("float", "float_val", float_threshold),
+        ("int8", "int8_val", threshold),
+    ]
+
+
+def val_per_record_rows(y_val, record_ids_val, preds, threshold, float_threshold, evaluate):
+    """Per-record validation metrics for the same rows as comparison_rows, so the val-side
+    error sources (e.g. how much of val FP/FN one record contributes) can be reviewed directly.
+    `preds` is comparison_rows' mapping; only the val probabilities are used.
+    """
+    tables = []
+    for model_name, threshold_from, t in row_specs(threshold, float_threshold):
+        _, per_record = evaluate.evaluate_predictions(y_val, preds[model_name][0], record_ids_val, t)
+        tables.append(per_record.assign(model=model_name, threshold_from=threshold_from, threshold=t))
+    return pd.concat(tables, ignore_index=True)
 
 
 def main():
@@ -143,8 +240,9 @@ def main():
     X_val_spec, X_val_rr, y_val, record_ids_val = data.build_dataset(
         VAL_RECORDS, args.data_dir, max_normal_per_record=None, augment=False, seed=args.seed,
     )
-    X_test_spec, X_test_rr, y_test, record_ids_test = data.build_dataset(
+    X_test_spec, X_test_rr, y_test, record_ids_test, symbols_test = data.build_dataset(
         TEST_RECORDS, args.data_dir, max_normal_per_record=None, augment=False, seed=args.seed,
+        return_symbols=True,
     )
     print(f"Train: {len(X_train_spec)} | Val: {len(X_val_spec)} | Test: {len(X_test_spec)}")
 
@@ -159,29 +257,16 @@ def main():
             json.dump({"mean": rr_mean.tolist(), "std": rr_std.tolist()}, f, indent=2)
         print(f"R-R normalizer (train): mean={rr_mean.round(4).tolist()} std={rr_std.round(4).tolist()}")
 
-    loss = ecg_model.focal_loss(gamma=2.0, alpha=0.25)
-
     def fit(m, lr, epochs):
-        m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr), loss=loss, metrics=["accuracy"])
-        early_stop_cb = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=12, restore_best_weights=True)
-        m.fit(
-            x=[X_train_spec, X_train_rr],
-            y=y_train,
-            validation_data=([X_val_spec, X_val_rr], y_val),
-            epochs=epochs,
-            batch_size=args.batch_size,
-            callbacks=[early_stop_cb],
-        )
+        fit_model(m, tf, ecg_model, [X_train_spec, X_train_rr], y_train, ([X_val_spec, X_val_rr], y_val),
+                  lr, epochs, args.batch_size)
 
     spec_shape = X_train_spec.shape[1:]
     if args.load_model:
         print(f"\nLoading saved float model {args.load_model} (no training)...")
         model = tf.keras.models.load_model(args.load_model, compile=False)
     else:
-        if args.variant == "baseline":
-            model = ecg_model.build_multiscale_ptq_model(spec_shape)
-        else:
-            model = ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras)
+        model = build_model(args.variant, spec_shape, tf, ecg_model)
         model.summary()
         print("\nTraining (float)...")
         fit(model, 0.001, args.epochs)
@@ -241,6 +326,13 @@ def main():
     print(json.dumps(int8_overall, indent=2))
     print(int8_per_record.to_string(index=False))
 
+    # Sensitivity check, not a replacement for the full-test numbers: test without the record
+    # whose patient (201) is also in train.
+    keep = record_ids_test != OVERLAP_RECORD
+
+    def overall_excl_overlap(probs, t):
+        return evaluate.evaluate_predictions(y_test[keep], probs[keep], record_ids_test[keep], t)[0]
+
     model_size_kb = len(tflite_bytes) / 1024
     print(f"\nModel size (INT8 .tflite): {model_size_kb:.2f} KB")
 
@@ -266,6 +358,9 @@ def main():
             "float": float_overall,
             "float_own_threshold": float_own_overall,
             "int8": int8_overall,
+            f"float_excl_{OVERLAP_RECORD}": overall_excl_overlap(test_probs_float, threshold),
+            f"float_own_threshold_excl_{OVERLAP_RECORD}": overall_excl_overlap(test_probs_float, float_threshold),
+            f"int8_excl_{OVERLAP_RECORD}": overall_excl_overlap(test_probs_int8, threshold),
         }, f, indent=2)
 
     per_record_combined = pd.concat([
@@ -274,12 +369,15 @@ def main():
     ], ignore_index=True)
     per_record_combined.to_csv(os.path.join(args.artifacts_dir, "per_record_metrics.csv"), index=False)
 
+    preds = {"float": (val_probs_float, float_sweep_df, test_probs_float),
+             "int8": (val_probs_int8, sweep_df, test_probs_int8)}
     comparison_rows(
-        label, args, y_val, y_test, record_ids_test,
-        {"float": (val_probs_float, float_sweep_df, test_probs_float),
-         "int8": (val_probs_int8, sweep_df, test_probs_int8)},
+        label, args, y_val, y_test, record_ids_test, symbols_test, preds,
         threshold, float_threshold, model_size_kb, levels, evaluate,
     ).to_csv(os.path.join(args.artifacts_dir, "comparison_rows.csv"), index=False)
+    val_per_record_rows(
+        y_val, record_ids_val, preds, threshold, float_threshold, evaluate,
+    ).to_csv(os.path.join(args.artifacts_dir, "val_per_record_metrics.csv"), index=False)
 
     if args.no_firmware_export:
         print(f"\nWrote artifacts to {args.artifacts_dir}/ (firmware headers not written).")

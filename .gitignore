@@ -1,4 +1,4 @@
-﻿# Python environment & caches
+# Python environment & caches
 .venv/
 __pycache__/
 *.pyc
@@ -10,6 +10,8 @@ logs/
 
 # Per-run comparison and analysis outputs (regenerable; findings go in artifacts/diagnosis.md)
 artifacts/variants/
+artifacts/dechazal/variants/
+artifacts/dechazal/cv/
 artifacts/split_analysis/
 
 # Editor settings

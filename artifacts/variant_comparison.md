@@ -1,5 +1,7 @@
 # Float vs. INT8 by variant
 
+> **Old split:** these results use the old hand-picked train/val/test split. De Chazal-split results are in `artifacts/dechazal/variant_comparison.md`.
+
 Test set, seed 42. `threshold_from`: `int8_val` is the threshold chosen on the INT8 model's
 validation predictions (the deployed convention); `float_val` is the float model's own
 val-optimal threshold. For `qat`, the float row is the float model before QAT fine-tuning.
