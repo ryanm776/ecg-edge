@@ -471,6 +471,60 @@ Each held-out fold is re-scored by its own INT8 fold model after shuffling, amon
   - The CNN's pooled S ranking (0.771) is still below the R-R-only baseline's. Part of the gap may be how the R-R features are represented (raw seconds and ratios, unnormalized, 10-interval window), not only the objective.
   - The R-R bug (step 0) affects all of these numbers. They are measured on the current, buggy inputs.
 
+## Stage 2 plan
+
+Fixes are ordered from most fundamental to least: input correctness → objective → input representation → architecture → error re-check. Each step's result sets the baseline for the next.
+
+**Rules for every step:**
+- One change at a time.
+- Each change is retrained under grouped CV (`train_cv.py`) with seeds 42, 43, 44.
+- Decisions use only OOF per-class (S vs N, V vs N) ROC-AUC and PR-AUC. DS2 results are reported and never used for a choice.
+- A change counts only if its gain is larger than the measured seed-to-seed spread.
+
+**Step 1: beat-only R-R intervals.**
+- Change: `extract_beats_from_record` computes R-R between consecutive beat annotations only (step 0), with tests.
+- Retrain the CV baseline: binary bn_folded, current focal loss (gamma 2, alpha 0.25), seeds 42–44. That run becomes the baseline for step 2.
+
+**Step 2a: separate class structure from weighting.** Binary vs. N/S/V multiclass under two weightings, with focal gamma = 2 in every run:
+
+| Weighting | Binary | Multiclass |
+|---|---|---|
+| unweighted | no alpha | no class weights |
+| matched | alpha 0.25 (the step-1 baseline) | N 0.75 / S 0.25 / V 0.25 |
+
+- Binary and multiclass are compared within each pair.
+- **Reading the result:** if multiclass wins under both weightings, the benefit is structural. If it wins under only one, structure and weighting interact.
+- **Multiclass is N/S/V only:** F and Q are still dropped. The README must say so wherever results are compared with the literature.
+- The threshold runs on `abnormal_score` (1 − P(N)), so the CV pipeline is unchanged.
+
+**Step 2b: balanced class weights.**
+- Multiclass with inverse-frequency class weights, compared with the better 2a multiclass run.
+- Once a multiclass model exists, +P for S and V is reported alongside Se.
+
+**Step 3: R-R representation, only if a gap remains after step 2.**
+- 3a: 30-interval lookback window.
+- 3b: global standardization (`--normalize-rr`).
+- The median-based ratio is dropped (step 2 of Stage 1).
+
+**Step 4: global average pooling instead of Flatten.**
+- Judged on per-class AUC and model size.
+- Flatten → Dense(64) holds 197,184 of the model's ~202.2k parameters: 3,072 spectrogram features (16 × 6 × 32) plus 8 R-R features, times 64.
+
+**Step 5: re-check false positives.**
+- **Re-measure after steps 1–2:** AF/flutter normal-beat false positives (222, 219, 202 on DS2; 203 in DS1 OOF).
+- **Known limitations:**
+  - Wide-QRS false positives: there are only 4 bundle-branch-block patients in DS1.
+  - Record 124's junctional (`J`) beats: neither cue separates them.
+
+**Parked:**
+- Pan-Tompkins R-peaks
+- DS2 sensitivity analysis
+- pruning
+- firmware header regeneration
+- calibration sweep
+- fair QAT
+- the final model's epoch count (fold best epochs range from 5 to 56)
+
 ### Step 4: false positives on DS1 OOF are not wide-QRS; on DS2 they have two sources
 
 - **OOF, INT8, at t = 0.50:**
