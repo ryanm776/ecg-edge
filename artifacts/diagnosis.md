@@ -432,9 +432,44 @@ These are R-R-only S-vs-N classifiers under the same grouped folds: 201 always t
   - With a 30-interval mean the median drops to 0.825, and 209's single-feature AUC rises from 0.756 to 0.897. The median of 10 gives 0.731, because a run longer than half the window defeats a median too.
   - Pooled single-feature AUC: mean of 30 gives 0.849, vs. 0.727 for the mean of 10. Inside the 5-feature set the gain is small (0.916 → 0.923).
 
-### Step 3: shuffle tests (pending)
+### Step 3: the CNN uses R-R timing for S and shape for V
 
-This step re-scores each held-out fold with its fold model after shuffling, within each record, the R-R inputs, the spectrograms, or both. It shows whether the CNN's S scores depend on timing or on shape. Run with `python scripts/diagnose_s_beats.py --steps 3`.
+Each held-out fold is re-scored by its own INT8 fold model after shuffling, among beats of the same record, the R-R inputs, the spectrograms, or both. Results are averaged over 3 shuffle seeds, then mean ± std over model seeds. The unshuffled scores reproduce `oof_predictions.npz` exactly.
+
+| Pooled OOF | Unshuffled | R-R shuffled | Spectrogram shuffled | Both shuffled |
+|---|---|---|---|---|
+| S vs N ROC-AUC | 0.771 ± 0.060 | 0.621 ± 0.067 | 0.652 ± 0.106 | 0.482 ± 0.080 |
+| V vs N ROC-AUC | 0.966 ± 0.003 | 0.891 ± 0.022 | 0.769 ± 0.052 | 0.554 ± 0.046 |
+| S mean score | 0.263 | 0.180 | 0.205 | 0.134 |
+| V share above t | 0.772 | 0.556 | 0.249 | 0.170 |
+| N share above t | 0.012 | 0.015 | 0.040 | 0.047 |
+
+**Within patient, S vs. own N, change in ROC-AUC:**
+
+| Record | Unshuffled | R-R shuffled | Spectrogram shuffled |
+|---|---|---|---|
+| 118 | 0.922 | −0.386 ± 0.103 | +0.018 ± 0.076 |
+| 207 | 0.982 | −0.347 ± 0.250 | −0.109 ± 0.047 |
+| 223 | 0.965 | −0.329 ± 0.072 | −0.102 ± 0.032 |
+| 220 | 0.982 | −0.074 ± 0.048 | −0.070 ± 0.046 |
+| 209 | 0.806 | −0.065 ± 0.028 | −0.117 ± 0.181 |
+| 124 | 0.572 | −0.031 ± 0.041 | −0.043 ± 0.040 |
+
+- **The R-R branch is not ignored.** Shuffling R-R costs S 0.151 ± 0.024 pooled AUC and lowers the mean S score from 0.263 to 0.180. In 118, 207 and 223, S ranking comes mostly from timing: shuffling R-R costs 0.33–0.39 AUC, while shuffling the spectrogram changes it by −0.11 to +0.02.
+- **V detection is mostly shape.** Shuffling the spectrogram drops V recall at t from 0.772 to 0.249; shuffling R-R drops it to 0.556. Shape is also what keeps normal beats low: with the spectrogram shuffled, the N share above t goes from 0.012 to 0.040.
+- **220 uses both cues redundantly.** Each shuffle alone costs about 0.07, both together 0.475.
+- **209 leans on shape (−0.117) more than timing (−0.065).** This fits step 2: its SVTA runs mask prematurity in the 10-interval `rr_ratio`.
+- **124 is at chance under every condition.** Its 31 S beats (29 `J`) are separable by neither cue in this model.
+- **Shuffling both drops within-patient S-vs-N AUC to 0.500–0.522,** the sanity floor.
+
+**What Stage 1 shows together:**
+- The CNN reads the R-R inputs and uses them to rank S beats within a patient (step 3).
+- The inputs carry enough information to separate S from N across patients (step 2: logreg pooled AUC 0.916).
+- Yet the CNN's S scores stay low in absolute terms, inside other patients' normal tail (step 1: median 0.233).
+- So the remaining gap points at how strongly training pushes S beats toward "abnormal": the training objective (a binary label where V is 82% of abnormals, plus focal alpha = 0.25). Missing input information and an ignored R-R branch are ruled out as the main cause.
+- Two caveats:
+  - The CNN's pooled S ranking (0.771) is still below the R-R-only baseline's. Part of the gap may be how the R-R features are represented (raw seconds and ratios, unnormalized, 10-interval window), not only the objective.
+  - The R-R bug (step 0) affects all of these numbers. They are measured on the current, buggy inputs.
 
 ### Step 4: false positives on DS1 OOF are not wide-QRS; on DS2 they have two sources
 
