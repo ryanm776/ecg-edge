@@ -21,6 +21,10 @@ ABNORMAL_TYPES = {"ventricular": VENTRICULAR, "supraventricular": SUPRAVENTRICUL
 
 WINDOW_SIZE = 250
 
+# PhysioNet annotation codes that mark a QRS complex. Every other code in an .atr file (rhythm
+# change "+", noise "~", isolated artifact "|", "x", "!", comments, ...) is not a beat.
+BEAT_SYMBOLS = frozenset("NLRBAaJSVrFejnE/fQ?")
+
 
 def type_recall(y, symbols, probs, threshold):
     """Recall of each abnormal type at a threshold: {type: (n, detected, recall)}."""
@@ -99,6 +103,21 @@ def compute_rr_timing_features(rr_intervals, i, lookback=10):
     rr_ratio = pre_rr / local_mean_rr if local_mean_rr > 0 else 1.0
     pre_post_ratio = pre_rr / post_rr if post_rr > 0 else 1.0
     return [pre_rr, post_rr, local_mean_rr, rr_ratio, pre_post_ratio]
+
+
+def rr_quantile_ratio(rr_intervals, i, lookback=10, q=0.5):
+    """pre_rr over the q-quantile of the same window compute_rr_timing_features averages
+    (rr_intervals[i - lookback:i], which includes pre_rr itself). q=0.5 is the median, q=1.0 the max.
+    A mean or median is pulled down when premature beats fill much of the window; a high quantile isn't
+    until they fill nearly all of it."""
+    pre_rr = rr_intervals[i - 1]
+    reference = np.quantile(rr_intervals[max(0, i - lookback):i], q)
+    return pre_rr / reference if reference > 0 else 1.0
+
+
+def beat_annotation_mask(symbols):
+    """True where an annotation marks a beat (BEAT_SYMBOLS), False for non-beat annotations."""
+    return np.array([s in BEAT_SYMBOLS for s in symbols], dtype=bool)
 
 
 def fit_rr_normalizer(X_rr):
