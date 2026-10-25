@@ -4,14 +4,17 @@ import scipy.signal as signal
 import pytest
 
 from ecg.features import (
+    BEAT_SYMBOLS,
     SYMBOL_MAP,
     aami_class,
     aami_class_metrics,
     apply_rr_normalizer,
+    beat_annotation_mask,
     compute_rr_timing_features,
     compute_spectrogram,
     extract_beats_from_record,
     fit_rr_normalizer,
+    rr_quantile_ratio,
     type_recall,
 )
 
@@ -101,6 +104,31 @@ def test_compute_rr_timing_features_respects_lookback_window():
     _, _, local_mean_rr, _, _ = compute_rr_timing_features(rr_intervals, i=5, lookback=2)
 
     assert local_mean_rr == np.mean(rr_intervals[3:5])
+
+
+def test_rr_quantile_ratio_uses_the_mean_window():
+    rr_intervals = np.array([10.0, 0.8, 0.4, 0.8, 0.4, 0.8, 0.5])
+    i, lookback = 6, 5
+    window = rr_intervals[1:6]  # the same slice compute_rr_timing_features averages
+
+    assert rr_quantile_ratio(rr_intervals, i, lookback, q=0.5) == rr_intervals[5] / np.quantile(window, 0.5)
+    assert rr_quantile_ratio(rr_intervals, i, lookback, q=1.0) == rr_intervals[5] / window.max()
+    assert rr_quantile_ratio(rr_intervals, i, lookback, q=0.9) == rr_intervals[5] / np.quantile(window, 0.9)
+
+
+def test_rr_quantile_ratio_median_is_masked_when_most_beats_are_premature():
+    # 7 premature (0.5 s) and 3 sinus (1.0 s) intervals before a premature beat.
+    rr_intervals = np.array([0.5, 1.0, 0.5, 0.5, 1.0, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5])
+
+    assert rr_quantile_ratio(rr_intervals, 10, lookback=10, q=0.5) == 1.0  # looks on-time
+    assert rr_quantile_ratio(rr_intervals, 10, lookback=10, q=0.9) == 0.5
+    assert rr_quantile_ratio(rr_intervals, 10, lookback=10, q=1.0) == 0.5
+
+
+def test_beat_annotation_mask_covers_every_dataset_symbol_and_no_rhythm_codes():
+    assert set(SYMBOL_MAP) | {"F", "Q"} <= BEAT_SYMBOLS
+    mask = beat_annotation_mask(["N", "+", "A", "~", "|", "V", "x", "!", '"', "F"])
+    assert mask.tolist() == [True, False, True, False, False, True, False, False, False, True]
 
 
 def test_rr_normalizer_standardizes_train_and_reuses_train_stats():

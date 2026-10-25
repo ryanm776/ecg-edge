@@ -357,3 +357,194 @@ bn_folded, patient-grouped 5-fold CV over DS1 (`scripts/train_cv.py`), seeds 42,
 - **False negatives:** 232 contributes 671 / 1,134 / 1,223 (36% / 75% / 73% of FNs). Next are 228 (276 of 365, seed 42 only), 233, 222 and 200 (80–104 of 856).
 - **False positives:** 222 is a top-three source in every seed: 203 / 712 / 491 (8.9% / 31.3% / 21.6% of its normal beats). LBBB records also contribute: 214 (282 / 412 in seeds 42 and 43) and 111 (10 / 330 / 121). In seed 42, record 212 (RBBB) is the largest source at 684 (54%). Record 105 contributes 57–122.
 - **OOF false positives** come from 203, 114, 230, 215 and 208. None of these are bundle-branch-block records, so OOF FPs still don't predict the DS2 sources (222, 212, 214, 111).
+
+## Stage 1: S-beat and FP diagnosis
+
+These results use no training. They come from the grouped-CV bn_folded runs (seeds 42, 43, 44) and `scripts/diagnose_s_beats.py`. Full tables are in `artifacts/dechazal/stage1/step*.md`. Every input to a Stage 2 decision is DS1 out-of-fold (OOF); the DS2 rows are descriptive. Before any analysis the script checked three things: the recomputed R-R features equal `build_dataset`'s `X_rr` beat for beat, the OOF rows line up with `oof_predictions.npz`, and DS2 per-record FP/FN match each run's `per_record_metrics.csv`.
+
+### Step 0: the R-R features are computed across non-beat annotations
+
+`extract_beats_from_record` takes R-R intervals between consecutive annotations of any kind. MIT-BIH's `.atr` files also contain rhythm changes (`+`), noise (`~`), artifacts (`|`, `x`), flutter waves (`!`) and comments (`"`). A beat counts as affected when any of its 5 R-R features differs from the beat-only computation.
+
+| Split | N affected | S affected | V affected | Median rr_ratio error (N / S / V) | p90 rr_ratio error (N / S / V) |
+|---|---|---|---|---|---|
+| DS1 | 5,956 / 45,834 (13.0%) | 268 / 943 (28.4%) | 1,207 / 3,788 (31.9%) | 0.114 / 0.139 / 0.119 | 0.417 / 0.473 / 0.442 |
+| DS2 | 6,008 / 44,232 (13.6%) | 377 / 1,836 (20.5%) | 1,071 / 3,220 (33.3%) | 0.126 / 0.103 / 0.128 | 0.389 / 0.342 / 0.440 |
+
+Errors are relative, |all-annotation − beat-only| / beat-only, over affected beats.
+
+- **Most of the error enters through the 10-interval lookback.** The median pre_rr error among affected beats is 0. Only 772 N, 28 S and 179 V beats in DS1 have a non-beat annotation directly before them.
+- **Abnormal beats are hit about twice as often as normal ones.** Rhythm annotations cluster at arrhythmia episodes.
+- **The worst records:** 200 (51.9% of beats), 230 (50.6%), 119 (44.3%) and 222 (43.6%). In 207, 472 ventricular-flutter wave annotations (`!`) give E beats an rr_ratio of 3.28 where the beat-only value is 0.21. In 231, 427 comment annotations affect 34% of beats.
+- **Fixing it improves R-R-only S-vs-N separation** (step 2b, current 5 features). Logistic regression: pooled ROC-AUC 0.916 → 0.929, PR-AUC 0.166 → 0.240. Gradient boosting: PR-AUC 0.462 → 0.499, while ROC-AUC goes 0.934 → 0.929. Single-feature `rr_ratio`: pooled AUC 0.775 → 0.814.
+- **Training and deployment don't match.** The firmware will compute R-R from Pan-Tompkins detections, which contain beats only. So the deployed model would get beat-only R-R features while being trained on all-annotation ones.
+
+### Step 1: within most patients the model ranks S beats correctly, but their scores are too low
+
+| OOF INT8 (mean ± std over seeds) | ROC-AUC | PR-AUC | Recall at t = 0.50 |
+|---|---|---|---|
+| S vs N, pooled | 0.771 ± 0.060 | 0.075 ± 0.028 | 0.094 ± 0.014 |
+| V vs N, pooled | 0.966 ± 0.003 | 0.860 ± 0.010 | 0.772 ± 0.007 |
+
+Float gives the same numbers (S vs N ROC-AUC 0.772), so quantization isn't the cause.
+
+**Within each patient, S vs. that patient's own N beats (INT8):**
+
+| Record | S beats | ROC-AUC | S recall at t | That patient's N above t |
+|---|---|---|---|---|
+| 207 | 106 | 0.982 ± 0.007 | 0.053 ± 0.068 | 0.009 |
+| 220 | 94 | 0.982 ± 0.011 | 0.323 ± 0.358 | 0.001 |
+| 223 | 73 | 0.965 ± 0.019 | 0.037 ± 0.063 | 0.000 |
+| 118 | 96 | 0.922 ± 0.069 | 0.181 ± 0.158 | 0.002 |
+| 209 | 383 | 0.806 ± 0.198 | 0.029 ± 0.014 | 0.001 |
+| 124 | 31 | 0.572 ± 0.016 | 0.000 | 0.000 |
+
+- In four of six patients, the model ranks S above that patient's own normal beats (AUC 0.92–0.98). It still detects almost none of them.
+- **S scores sit in the normal tail.** S beats have a median score of 0.233 and a 90th percentile of 0.499. Normal beats have a 90th percentile of 0.273 and a 99th of 0.526. V beats have a median of 0.728.
+- **S scores are too low in absolute terms and overlap other patients' normal tails.** This isn't the threshold: the threshold sits at a real F1 peak dominated by V, and no single threshold can separate S from N across patients when pooled PR-AUC is 0.075.
+- **209 and 124 are different.** There the model's ranking is also weak: 209 is unstable across seeds (0.583 / 0.869 / 0.964 in step 2b's comparison), and 124 is near chance.
+
+### Step 2: the S information is in the R-R inputs, but the CNN doesn't use it
+
+These are R-R-only S-vs-N classifiers under the same grouped folds: 201 always trains, N is capped at 600 per record, V beats are dropped, and the same beats as the CNN are used. All rows are OOF ROC-AUC.
+
+| Source | Pooled | 118 | 124 | 207 | 209 | 220 | 223 | Pooled PR-AUC |
+|---|---|---|---|---|---|---|---|---|
+| logreg, current 5 features | 0.916 | 0.982 | 0.812 | 0.988 | 0.981 | 0.988 | 0.980 | 0.166 |
+| logreg, 5 beat-only features | 0.929 | 0.996 | 0.836 | 0.989 | 0.992 | 0.993 | 0.996 | 0.240 |
+| hgb, current 5 features | 0.934 | 0.998 | 0.474 | 0.846 | 0.995 | 0.970 | 0.974 | 0.462 |
+| CNN INT8, seeds 42 / 43 / 44 | 0.781 / 0.707 / 0.826 | 0.843 / 0.964 / 0.960 | 0.569 / 0.589 / 0.558 | 0.975 / 0.983 / 0.988 | 0.583 / 0.869 / 0.964 | 0.994 / 0.974 / 0.977 | 0.959 / 0.951 / 0.987 | 0.078 / 0.045 / 0.101 |
+
+- **A logistic regression on the CNN's own 5 R-R inputs beats the CNN on S.** That holds even with the annotation bug: pooled ROC-AUC 0.916 vs. 0.707–0.826, PR-AUC 0.166 vs. 0.045–0.101. Gradient boosting reaches PR-AUC 0.462. On 209, logreg gets 0.981.
+- **So for S, the limit is not missing input information.**
+- **Caveat:** the baselines are trained on S vs. N with balanced class weights. The CNN is trained on abnormal vs. normal, where V is 82% of train abnormals and focal alpha = 0.25 weights abnormal beats at 0.25. This step therefore shows that the information exists. It doesn't yet separate the objective from the architecture (an underused R-R branch). Step 3 addresses that.
+
+**The median-based ratio doesn't help.**
+- In the 5-feature sets, swapping the mean for the median of the same 10-interval window changes pooled ROC-AUC by +0.002 (logreg) and −0.006 (hgb). Alone, the two are similar: 0.722 for the median vs. 0.727 for the mean.
+- **The 90th percentile and the max are worse.** Pooled, alone: 0.699 and 0.679. Within 232: 0.912 and 0.897.
+- **232 isn't a masking case (DS2, descriptive).**
+  - Its A beats are already separated from its own normal beats by the mean-based `rr_ratio`: within-patient AUC 0.973, or 0.992 beat-only.
+  - Their `rr_ratio` (median 0.745, IQR 0.666–0.839) is inside the DS1 S range (pooled DS1 S median 0.883).
+  - What's unusual in 232 is its normal beats: median `rr_ratio` 1.767 and `pre_post_ratio` 2.384. These are the long pauses of sinus bradycardia (the record's only rhythm annotation is `(SBR`).
+  - So 232's misses aren't explained by unusual R-R values on its A beats.
+- **Masking is real in 209, and a longer window fixes it, not the median.**
+  - 209's S beats come in SVTA runs (10 `(SVTA` rhythm annotations). The runs fill the 10-interval window, so their `rr_ratio` median is 0.950, barely premature.
+  - With a 30-interval mean the median drops to 0.825, and 209's single-feature AUC rises from 0.756 to 0.897. The median of 10 gives 0.731, because a run longer than half the window defeats a median too.
+  - Pooled single-feature AUC: mean of 30 gives 0.849, vs. 0.727 for the mean of 10. Inside the 5-feature set the gain is small (0.916 → 0.923).
+
+### Step 3: the CNN uses R-R timing for S and shape for V
+
+Each held-out fold is re-scored by its own INT8 fold model after shuffling, among beats of the same record, the R-R inputs, the spectrograms, or both. Results are averaged over 3 shuffle seeds, then mean ± std over model seeds. The unshuffled scores reproduce `oof_predictions.npz` exactly.
+
+| Pooled OOF | Unshuffled | R-R shuffled | Spectrogram shuffled | Both shuffled |
+|---|---|---|---|---|
+| S vs N ROC-AUC | 0.771 ± 0.060 | 0.621 ± 0.067 | 0.652 ± 0.106 | 0.482 ± 0.080 |
+| V vs N ROC-AUC | 0.966 ± 0.003 | 0.891 ± 0.022 | 0.769 ± 0.052 | 0.554 ± 0.046 |
+| S mean score | 0.263 | 0.180 | 0.205 | 0.134 |
+| V share above t | 0.772 | 0.556 | 0.249 | 0.170 |
+| N share above t | 0.012 | 0.015 | 0.040 | 0.047 |
+
+**Within patient, S vs. own N, change in ROC-AUC:**
+
+| Record | Unshuffled | R-R shuffled | Spectrogram shuffled |
+|---|---|---|---|
+| 118 | 0.922 | −0.386 ± 0.103 | +0.018 ± 0.076 |
+| 207 | 0.982 | −0.347 ± 0.250 | −0.109 ± 0.047 |
+| 223 | 0.965 | −0.329 ± 0.072 | −0.102 ± 0.032 |
+| 220 | 0.982 | −0.074 ± 0.048 | −0.070 ± 0.046 |
+| 209 | 0.806 | −0.065 ± 0.028 | −0.117 ± 0.181 |
+| 124 | 0.572 | −0.031 ± 0.041 | −0.043 ± 0.040 |
+
+- **The R-R branch is not ignored.** Shuffling R-R costs S 0.151 ± 0.024 pooled AUC and lowers the mean S score from 0.263 to 0.180. In 118, 207 and 223, S ranking comes mostly from timing: shuffling R-R costs 0.33–0.39 AUC, while shuffling the spectrogram changes it by −0.11 to +0.02.
+- **V detection is mostly shape.** Shuffling the spectrogram drops V recall at t from 0.772 to 0.249; shuffling R-R drops it to 0.556. Shape is also what keeps normal beats low: with the spectrogram shuffled, the N share above t goes from 0.012 to 0.040.
+- **220 uses both cues redundantly.** Each shuffle alone costs about 0.07, both together 0.475.
+- **209 leans on shape (−0.117) more than timing (−0.065).** This fits step 2: its SVTA runs mask prematurity in the 10-interval `rr_ratio`.
+- **124 is at chance under every condition.** Its 31 S beats (29 `J`) are separable by neither cue in this model.
+- **Shuffling both drops within-patient S-vs-N AUC to 0.500–0.522,** the sanity floor.
+
+**What Stage 1 shows together:**
+- The CNN reads the R-R inputs and uses them to rank S beats within a patient (step 3).
+- The inputs carry enough information to separate S from N across patients (step 2: logreg pooled AUC 0.916).
+- Yet the CNN's S scores stay low in absolute terms, inside other patients' normal tail (step 1: median 0.233).
+- So the remaining gap points at how strongly training pushes S beats toward "abnormal": the training objective (a binary label where V is 82% of abnormals, plus focal alpha = 0.25). Missing input information and an ignored R-R branch are ruled out as the main cause.
+- Two caveats:
+  - The CNN's pooled S ranking (0.771) is still below the R-R-only baseline's. Part of the gap may be how the R-R features are represented (raw seconds and ratios, unnormalized, 10-interval window), not only the objective.
+  - The R-R bug (step 0) affects all of these numbers. They are measured on the current, buggy inputs.
+
+## Stage 2 plan
+
+Fixes are ordered from most fundamental to least: input correctness → objective → input representation → architecture → error re-check. Each step's result sets the baseline for the next.
+
+**Rules for every step:**
+- One change at a time.
+- Each change is retrained under grouped CV (`train_cv.py`) with seeds 42, 43, 44.
+- Decisions use only OOF per-class (S vs N, V vs N) ROC-AUC and PR-AUC. DS2 results are reported and never used for a choice.
+- A change counts only if its gain is larger than the measured seed-to-seed spread.
+
+**Step 1: beat-only R-R intervals.**
+- Change: `extract_beats_from_record` computes R-R between consecutive beat annotations only (step 0), with tests.
+- Retrain the CV baseline: binary bn_folded, current focal loss (gamma 2, alpha 0.25), seeds 42–44. That run becomes the baseline for step 2.
+
+**Step 2a: separate class structure from weighting.** Binary vs. N/S/V multiclass under two weightings, with focal gamma = 2 in every run:
+
+| Weighting | Binary | Multiclass |
+|---|---|---|
+| unweighted | no alpha | no class weights |
+| matched | alpha 0.25 (the step-1 baseline) | N 0.75 / S 0.25 / V 0.25 |
+
+- Binary and multiclass are compared within each pair.
+- **Reading the result:** if multiclass wins under both weightings, the benefit is structural. If it wins under only one, structure and weighting interact.
+- **Multiclass is N/S/V only:** F and Q are still dropped. The README must say so wherever results are compared with the literature.
+- The threshold runs on `abnormal_score` (1 − P(N)), so the CV pipeline is unchanged.
+
+**Step 2b: balanced class weights.**
+- Multiclass with inverse-frequency class weights, compared with the better 2a multiclass run.
+- Once a multiclass model exists, +P for S and V is reported alongside Se.
+
+**Step 3: R-R representation, only if a gap remains after step 2.**
+- 3a: 30-interval lookback window.
+- 3b: global standardization (`--normalize-rr`).
+- The median-based ratio is dropped (step 2 of Stage 1).
+
+**Step 4: global average pooling instead of Flatten.**
+- Judged on per-class AUC and model size.
+- Flatten → Dense(64) holds 197,184 of the model's ~202.2k parameters: 3,072 spectrogram features (16 × 6 × 32) plus 8 R-R features, times 64.
+
+**Step 5: re-check false positives.**
+- **Re-measure after steps 1–2:** AF/flutter normal-beat false positives (222, 219, 202 on DS2; 203 in DS1 OOF).
+- **Known limitations:**
+  - Wide-QRS false positives: there are only 4 bundle-branch-block patients in DS1.
+  - Record 124's junctional (`J`) beats: neither cue separates them.
+
+**Parked:**
+- Pan-Tompkins R-peaks
+- DS2 sensitivity analysis
+- pruning
+- firmware header regeneration
+- calibration sweep
+- fair QAT
+- the final model's epoch count (fold best epochs range from 5 to 56)
+
+### Step 4: false positives on DS1 OOF are not wide-QRS; on DS2 they have two sources
+
+- **OOF, INT8, at t = 0.50:**
+  - L beats: 24.0 ± 13.9 FP of 3,947 (0.6%).
+  - R beats: 4.7 ± 4.7 of 3,779 (0.1%).
+  - N beats: 510.7 ± 89.9 of 36,452 (1.4%).
+  - Every fold model trains on 1–2 LBBB patients (515–1,115 beats) and 2–3 RBBB patients (683–1,283 beats).
+- **DS2, final models (descriptive).** Seeds 42 / 43 / 44, FP / normal beats of that symbol:
+
+| Source | Record | Symbol | FP, seeds 42 / 43 / 44 | Total |
+|---|---|---|---|---|
+| Wide QRS | 212 | R | 684 / 78 / 2 | 1,825 |
+| Wide QRS | 214 | L | 282 / 412 / 12 | 2,001 |
+| Wide QRS | 111 | L | 10 / 330 / 121 | 2,122 |
+| AF/flutter | 222 | N | 203 / 706 / 479 | 2,060 |
+| AF/flutter | 219 | N | 0 / 190 / 4 | 2,081 |
+| AF/flutter | 202 | N | 1 / 93 / 2 | 2,060 |
+| Noise | 105 | N | 57 / 113 / 122 | 2,525 |
+
+  Rhythm annotations: 222 has AFIB 24, AFL 42 and NOD 31; 219 has AFIB 10; 202 has AFIB 4 and AFL 1. 105 has 88 noise annotations (`~`).
+
+- **Wide-QRS false positives depend heavily on the seed.** For example, 214 has 282 / 412 / 12, even though every fold model handles DS1's L and R beats. This looks like generalization variance across a few bundle-branch-block patients (4 in DS1), not missing coverage.
+- **The AF/flutter normal beats are an R-R problem, not a shape problem.** An irregular rhythm makes normal beats look premature. 222 is also one of the records most affected by the annotation bug (43.6% of beats). In DS1, 203 (AFIB 21, AFL 2) is the top OOF FP source.
