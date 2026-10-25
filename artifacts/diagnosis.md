@@ -329,3 +329,31 @@ Full tables: `artifacts/dechazal/variant_comparison.md`. Mean ± std uses ddof=1
 - **False negatives:** record 232 dominates every run, with 553–1,276 of its 1,381 abnormal beats missed. It holds 75% of DS2's S beats, so S recall (0.27–0.43) is largely record 232's recall. The next FN sources are 233, 228 and 200.
 - **False positives:** 222 is among the top four FP sources in every run (551–1,103). The others are 212, 213, 111 and 214. In bn_folded seed 42, 212 contributes 1,780 and 213 contributes 1,643. Record 105 contributes about 130–220 per run.
 - **Unverified hypothesis:** test contains normal morphologies absent from validation: 222, 212 (RBBB), 111 and 214 (LBBB). That may explain why validation false positives don't predict test false positives.
+
+## Grouped CV results
+
+bn_folded, patient-grouped 5-fold CV over DS1 (`scripts/train_cv.py`), seeds 42, 43, 44. The threshold is picked on pooled out-of-fold (OOF) INT8 scores. The final model trains on all 22 DS1 records for the median of the folds' best epochs and is evaluated once on DS2. Full tables: `artifacts/dechazal/cv_comparison.md`. Mean ± std uses ddof=1.
+
+| Setup | INT8 PR-AUC | INT8 test F1 | INT8 FP | INT8 FN | se_V | se_S | Threshold |
+|---|---|---|---|---|---|---|---|
+| fixed val (above) | 0.766 ± 0.007 | 0.636 ± 0.108 | 3,665 ± 3,630 | 1,208 ± 529 | 0.950 ± 0.044 | 0.430 ± 0.218 | 0.15 / 0.25 / 0.30 |
+| grouped CV | 0.748 ± 0.011 | 0.690 ± 0.036 | 1,366 ± 598 | 1,681 ± 177 | 0.881 ± 0.107 | 0.293 ± 0.101 | 0.50 / 0.50 / 0.50 |
+
+**CV fixes the threshold instability.**
+- All three seeds pick 0.50. It is a real peak, not a flat curve: pooled-OOF INT8 F1 is 0.737 / 0.716 / 0.741 at 0.50 and drops 0.001–0.017 one step away (0.45, 0.55). Only 1.8–2.0% of OOF scores fall in [0.45, 0.55].
+- Test F1 std drops from 0.108 to 0.036 and FP std from 3,630 to 598. The cost is more FNs (1,681 vs 1,208) and lower V and S sensitivity.
+- PR-AUC is 0.018 lower than the fixed-val runs. The final model has no early stopping on a validation set, and its epoch count varies (28 / 16 / 26). The fold best epochs range from 5 to 56. Seed 43 (16 epochs) has the lowest PR-AUC (0.740), but three seeds can't separate an epoch effect from seed noise.
+- Excluding record 202 changes F1 by at most 0.002.
+
+**DS2 results depend strongly on which patients are in training.** Each fold model is trained on about 4/5 of DS1. On DS2 (diagnostic only, never used for a choice), fold models span PR-AUC 0.548–0.870, F1 0.463–0.750, FP 74–862 and FN 1,749–3,510. The final models (0.740–0.761) sit inside that range.
+
+**S beats from unseen patients are almost never detected.**
+- Pooled OOF S recall over DS1 (815 S beats, 201 excluded) is 0.108 / 0.080 / 0.093 (88 / 65 / 76 detected).
+- Record 209 (383 A beats) is the largest OOF FN source in every seed: 369 / 369 / 378 of its 384 abnormal beats are missed. 207, 223 and 215 follow.
+- Per fold, OOF S recall is 0.000–0.310, with one outlier at 0.667 (seed 42, fold 3: 220/208/230/115/114).
+- This weakens the record-232 hypothesis. If 232 were the only problem, held-out DS1 S beats would be detected. Record 232's DS2 A-beat recall varies by seed (710 / 247 / 158 of 1,381 detected), and so does the S recall on the remaining 455 DS2 S beats: 0.086 / 0.488 / 0.523. The excl-232 figures are derived as se_S × 1,836 minus 232's TP, assuming all 232 abnormal beats are S. The record-232 diagnosis should compute them directly.
+
+**Test error sources (final INT8 model):**
+- **False negatives:** 232 contributes 671 / 1,134 / 1,223 (36% / 75% / 73% of FNs). Next are 228 (276 of 365, seed 42 only), 233, 222 and 200 (80–104 of 856).
+- **False positives:** 222 is a top-three source in every seed: 203 / 712 / 491 (8.9% / 31.3% / 21.6% of its normal beats). LBBB records also contribute: 214 (282 / 412 in seeds 42 and 43) and 111 (10 / 330 / 121). In seed 42, record 212 (RBBB) is the largest source at 684 (54%). Record 105 contributes 57–122.
+- **OOF false positives** come from 203, 114, 230, 215 and 208. None of these are bundle-branch-block records, so OOF FPs still don't predict the DS2 sources (222, 212, 214, 111).
