@@ -83,12 +83,39 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
 
 
 def focal_loss(gamma=2.0, alpha=0.25):
+    """Binary focal loss on a sigmoid output. `alpha` weights abnormal beats and 1 - alpha normal ones.
+    `alpha=None` is unweighted: weight 1 on both classes. (alpha=0.5 is not the same: it halves the
+    data loss against the fixed L2 penalty.)
+    """
     def loss(y_true, y_pred):
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
         bce = -(y_true * tf.math.log(y_pred) + (1.0 - y_true) * tf.math.log(1.0 - y_pred))
         p_t = y_true * y_pred + (1.0 - y_true) * (1.0 - y_pred)
         focal_factor = tf.pow(1.0 - p_t, gamma)
+        if alpha is None:
+            return tf.reduce_mean(focal_factor * bce)
         alpha_factor = y_true * alpha + (1.0 - y_true) * (1.0 - alpha)
         return tf.reduce_mean(alpha_factor * focal_factor * bce)
+    return loss
+
+
+def categorical_focal_loss(gamma=2.0, class_weights=None):
+    """Focal loss on a softmax output, with integer labels (one column of y_pred per class).
+
+    `class_weights[c]` weights beats whose true class is c; `None` is unweighted (weight 1 for every
+    class). The weights live in the loss rather than in Keras' `class_weight`, which doesn't apply to
+    `val_loss`, the quantity early stopping monitors. With two classes and weights (1 - alpha, alpha)
+    this equals `focal_loss(gamma, alpha)`.
+    """
+    weights = None if class_weights is None else tf.constant(class_weights, dtype=tf.float32)
+
+    def loss(y_true, y_pred):
+        y_true = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        p_t = tf.gather(y_pred, y_true, axis=1, batch_dims=1)
+        per_beat = tf.pow(1.0 - p_t, gamma) * -tf.math.log(p_t)
+        if weights is not None:
+            per_beat = tf.gather(weights, y_true) * per_beat
+        return tf.reduce_mean(per_beat)
     return loss
