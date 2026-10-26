@@ -5,6 +5,10 @@ Uses the grouped-CV runs in <cv-dir>/<variant>_seed<S>/ (oof_predictions.npz, th
 models in folds/, the final model) and writes <out-dir>/step<k>*.{md,csv}. Every Stage 2 decision rests on
 DS1 out-of-fold (OOF) results; DS2 appears only in outputs labeled descriptive.
 
+This diagnoses the pre-fix pipeline: the CV runs it reads were trained on all-annotation R-R features, so
+it rebuilds the data with build_dataset(rr_from_all_annotations=True). It doesn't apply to runs trained
+after the beat-only R-R fix (Stage 2 step 1).
+
 Steps (--steps, default 0 1 2 4):
   0. R-R audit. extract_beats_from_record takes R-R intervals between consecutive annotations, including
      non-beat ones (rhythm "+", noise "~", artifact "|", ...). Per record and AAMI class: how many beats'
@@ -193,10 +197,11 @@ def rr_table(records, data_dir):
 
 
 def build_eval_view(records, data_dir):
-    """The uncapped, unaugmented view train_cv.py scores (X_spec, X_rr, y, record_ids, symbols)."""
+    """The uncapped, unaugmented view the pre-fix train_cv.py runs scored (X_spec, X_rr, y, record_ids, symbols)."""
     from ecg import data
 
-    return data.build_dataset(records, data_dir, max_normal_per_record=None, augment=False, return_symbols=True)
+    return data.build_dataset(records, data_dir, max_normal_per_record=None, augment=False, return_symbols=True,
+                              rr_from_all_annotations=True)
 
 
 def reconcile_table(table, view, name):

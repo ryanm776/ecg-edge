@@ -25,7 +25,7 @@ def _table():
 
 
 def test_rr_feature_rows_keeps_exactly_the_dataset_beats_with_its_features():
-    _, X_rr, y, _, syms = extract_beats_from_record(SIGNAL, FS, SAMPLES, SYMBOLS, "r")
+    _, X_rr, y, _, syms = extract_beats_from_record(SIGNAL, FS, SAMPLES, SYMBOLS, "r", rr_from_all_annotations=True)
     table = _table()
 
     assert table["symbol"].tolist() == syms
@@ -80,7 +80,8 @@ def test_capped_normal_mask_keeps_first_normals_per_record_and_every_abnormal():
 
 
 def test_capped_normal_mask_matches_extract_beats_max_normal():
-    _, _, y_capped, _, syms_capped = extract_beats_from_record(SIGNAL, FS, SAMPLES, SYMBOLS, "r", max_normal=3)
+    _, _, y_capped, _, syms_capped = extract_beats_from_record(SIGNAL, FS, SAMPLES, SYMBOLS, "r", max_normal=3,
+                                                               rr_from_all_annotations=True)
     table = _table()
 
     keep = diag.capped_normal_mask(np.zeros(len(table)), table["symbol"].map({"N": 0, "A": 1, "V": 1}), cap=3)
@@ -121,3 +122,14 @@ def test_class_score_summary_counts_reconcile_with_the_input():
     for r in rows:
         s = scores[aami == r["class"]]
         assert r["frac_above_t"] == (s > 0.5).mean() and r["p50"] == np.median(s)
+
+
+def test_stage1_beat_only_features_are_what_the_fixed_pipeline_extracts():
+    _, X_rr, _, _, syms = extract_beats_from_record(SIGNAL, FS, SAMPLES, SYMBOLS, "r")
+    table = _table()
+    # The fixed pipeline keeps exactly the rows whose beat-only features are defined.
+    defined = table.dropna(subset=diag.feature_columns("beat_only"))
+
+    assert defined["symbol"].tolist() == syms
+    np.testing.assert_array_equal(defined[diag.feature_columns("beat_only")[:5]].to_numpy(np.float32),
+                                  np.array(X_rr, dtype=np.float32))

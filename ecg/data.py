@@ -35,12 +35,13 @@ def load_record(record_id, data_dir):
 
 
 def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
-                  return_symbols=False):
+                  return_symbols=False, rr_from_all_annotations=False):
     """Load, filter, and feature-extract every usable beat across `record_list`.
 
     Returns (X_spec, X_rr, y, record_ids) as arrays, all aligned beat-for-beat.
     `record_ids` is new relative to the original notebook -- needed for per-record metrics.
     `return_symbols=True` appends each beat's annotation symbol as a fifth array.
+    `rr_from_all_annotations=True` reproduces the pre-fix R-R features (see extract_beats_from_record).
     """
     ensure_mitdb_cached(data_dir, record_list)
     rng = np.random.default_rng(seed)
@@ -65,6 +66,7 @@ def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=Fal
             max_normal=max_normal_per_record,
             augment=augment,
             rng=rng,
+            rr_from_all_annotations=rr_from_all_annotations,
         )
         spec_list.extend(specs)
         rr_list.extend(rrs)

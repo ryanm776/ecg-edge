@@ -143,8 +143,15 @@ def extract_beats_from_record(
     augment=False,
     window_size=WINDOW_SIZE,
     rng=None,
+    rr_from_all_annotations=False,
 ):
     """Extract (spectrogram, R-R features, label) triples for every usable beat in a record.
+
+    R-R intervals run between consecutive beat annotations (BEAT_SYMBOLS, so F and Q beats count as
+    neighbors even though they aren't extracted); a beat is usable only with a beat annotation on
+    each side. `rr_from_all_annotations=True` restores the pre-fix behavior (intervals between
+    consecutive annotations of any kind, including "+", "~", ...), only to reproduce runs made
+    before beat-only R-R (artifacts/diagnosis.md, "Stage 1").
 
     `max_normal=None` means no cap on normal beats. `augment=True` adds an R-peak-jitter
     duplicate of each beat (simulating R-peak detection error) in addition to the original.
@@ -153,12 +160,18 @@ def extract_beats_from_record(
     half_window = window_size // 2
     rng = rng if rng is not None else np.random.default_rng()
 
-    rr_intervals = np.diff(samples) / fs
+    samples = np.asarray(samples)
+    if rr_from_all_annotations:
+        positions = np.arange(len(samples))
+    else:
+        positions = np.flatnonzero(beat_annotation_mask(symbols))
+    rr_intervals = np.diff(samples[positions]) / fs
     normal_count = 0
 
     spec_list, rr_list, y_list, record_id_list, symbol_list = [], [], [], [], []
 
-    for i in range(1, len(samples) - 1):
+    for j in range(1, len(positions) - 1):
+        i = positions[j]
         sample_idx = samples[i]
         sym = symbols[i]
 
@@ -183,7 +196,7 @@ def extract_beats_from_record(
 
             window = filtered_signal[adj_idx - half_window: adj_idx + half_window]
             norm_spec = compute_spectrogram(window, fs)
-            rr_features = compute_rr_timing_features(rr_intervals, i)
+            rr_features = compute_rr_timing_features(rr_intervals, j)
 
             spec_list.append(norm_spec)
             rr_list.append(rr_features)
