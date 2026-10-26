@@ -5,6 +5,7 @@ import pytest
 
 from ecg.features import (
     BEAT_SYMBOLS,
+    NSV_CLASSES,
     SYMBOL_MAP,
     aami_class,
     aami_class_metrics,
@@ -14,6 +15,7 @@ from ecg.features import (
     compute_spectrogram,
     extract_beats_from_record,
     fit_rr_normalizer,
+    nsv_labels,
     rr_quantile_ratio,
     type_recall,
 )
@@ -54,6 +56,21 @@ def test_aami_multiclass_se_and_pp_from_confusion_counts():
     assert m["S"] == (3, 2 / 3, 2 / 3)
     # V: 1 of 2 true V predicted V; 3 predicted V, 1 correct.
     assert m["V"] == (2, 1 / 2, 1 / 3)
+
+
+def test_nsv_labels_follow_aami_classes_and_agree_with_binary_labels():
+    symbols = np.array(list(SYMBOL_MAP), dtype=object)
+    labels = nsv_labels(symbols)
+
+    assert NSV_CLASSES == ("N", "S", "V")
+    for sym, label, cls in zip(symbols, labels, aami_class(symbols)):
+        assert NSV_CLASSES[label] == cls
+        assert (label > 0) == (SYMBOL_MAP[sym] == 1)
+
+
+def test_nsv_labels_reject_symbols_outside_n_s_v():
+    with pytest.raises(ValueError, match="F"):
+        nsv_labels(np.array(["N", "F", "V"], dtype=object))
 
 
 def test_aami_class_metrics_needs_exactly_one_prediction_kind():

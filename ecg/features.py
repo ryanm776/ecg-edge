@@ -54,6 +54,21 @@ def aami_class(symbols):
     return out
 
 
+#: Column order of the N/S/V multiclass model's output, and the integer label of each class.
+NSV_CLASSES = ("N", "S", "V")
+
+
+def nsv_labels(symbols):
+    """Integer N/S/V training labels (0 = N, 1 = S, 2 = V, the NSV_CLASSES order) from annotation symbols.
+
+    Raises on a symbol outside the three classes (extract_beats_from_record only keeps SYMBOL_MAP symbols).
+    """
+    classes = aami_class(symbols)
+    if np.any(classes == ""):
+        raise ValueError(f"Symbols outside N/S/V: {sorted(set(np.asarray(symbols)[classes == '']))}")
+    return np.array([NSV_CLASSES.index(c) for c in classes], dtype=np.int32)
+
+
 def aami_class_metrics(symbols, abnormal_pred=None, pred_classes=None):
     """AAMI sensitivity (Se) and positive predictivity (+P) for S and V: {cls: (n, se, pp)}.
 
