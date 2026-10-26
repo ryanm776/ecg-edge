@@ -6,8 +6,9 @@ models in folds/, the final model) and writes <out-dir>/step<k>*.{md,csv}. Every
 DS1 out-of-fold (OOF) results; DS2 appears only in outputs labeled descriptive.
 
 This diagnoses the pre-fix pipeline: the CV runs it reads were trained on all-annotation R-R features, so
-it rebuilds the data with build_dataset(rr_from_all_annotations=True). It doesn't apply to runs trained
-after the beat-only R-R fix (Stage 2 step 1).
+it rebuilds the data with build_dataset(rr_from_all_annotations=True, lead=None) (channel 0, so V5 for
+record 114). It doesn't apply to runs trained after the beat-only R-R fix (Stage 2 step 1) or the lead fix
+(step 1b).
 
 Steps (--steps, default 0 1 2 4):
   0. R-R audit. extract_beats_from_record takes R-R intervals between consecutive annotations, including
@@ -201,7 +202,7 @@ def build_eval_view(records, data_dir):
     from ecg import data
 
     return data.build_dataset(records, data_dir, max_normal_per_record=None, augment=False, return_symbols=True,
-                              rr_from_all_annotations=True)
+                              rr_from_all_annotations=True, lead=None)
 
 
 def reconcile_table(table, view, name):
