@@ -80,10 +80,20 @@ def parse_args():
     parser.add_argument("--min-precision", type=float, default=0.90)
     parser.add_argument("--target-recall", type=float, default=0.95)
     parser.add_argument("--aggregate-only", action="store_true", help="Skip the runs; just rebuild the tables.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Replace existing runs for these seeds (refused by default; earlier runs may be inputs "
+                             "to other analyses, e.g. diagnose_s_beats.py reads artifacts/dechazal/cv/).")
     args = parser.parse_args()
     if len(set(args.seeds)) != len(args.seeds):
         parser.error("--seeds has duplicates")
+    existing = [run_dir(args, s) for s in args.seeds if os.path.exists(os.path.join(run_dir(args, s), "folds.json"))]
+    if existing and not args.aggregate_only and not args.overwrite:
+        parser.error(f"runs already exist: {existing}; pass a new --artifacts-dir or --overwrite")
     return args
+
+
+def run_dir(args, seed):
+    return os.path.join(args.artifacts_dir, "cv", f"{args.variant}_seed{seed}")
 
 
 def fold_report(k, records, best_epoch, y_ho, symbols_ho, oof_int8, y_test, test_int8, threshold, evaluate):
@@ -117,7 +127,7 @@ def fold_report(k, records, best_epoch, y_ho, symbols_ho, oof_int8, y_test, test
 def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, cv):
     X_ev_spec, X_ev_rr, y_ev, rec_ev, sym_ev = ds1_eval
     X_te_spec, X_te_rr, y_te, rec_te, sym_te = ds2
-    out_dir = os.path.join(args.artifacts_dir, "cv", f"{args.variant}_seed{seed}")
+    out_dir = run_dir(args, seed)
     os.makedirs(os.path.join(out_dir, "folds"), exist_ok=True)
 
     # Training view of DS1: normal-beat cap and augmentation, like train.py's train set.

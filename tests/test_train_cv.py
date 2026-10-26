@@ -32,7 +32,8 @@ def _parse(monkeypatch, *argv):
     return train_cv.parse_args()
 
 
-def test_train_cv_args(monkeypatch):
+def test_train_cv_args(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # the default --artifacts-dir is relative; keep real runs out of the overwrite guard
     args = _parse(monkeypatch)
     assert args.variant == "bn_folded" and args.seeds == [42]
     assert Path(args.artifacts_dir) == Path("artifacts") / "dechazal"
@@ -41,8 +42,21 @@ def test_train_cv_args(monkeypatch):
             _parse(monkeypatch, *argv)
 
 
+
+def test_train_cv_refuses_to_overwrite_existing_runs(monkeypatch, tmp_path):
+    run = tmp_path / "cv" / "bn_folded_seed43"
+    run.mkdir(parents=True)
+    (run / "folds.json").write_text("{}")
+    base = ["--artifacts-dir", str(tmp_path), "--seeds", "42", "43"]
+
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, *base)
+    assert _parse(monkeypatch, *base, "--overwrite").overwrite
+    assert _parse(monkeypatch, *base, "--aggregate-only").aggregate_only
+    assert _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--seeds", "42").seeds == [42]
+
 def _fake_build_dataset(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
-                        return_symbols=False):
+                        return_symbols=False, rr_from_all_annotations=False):
     rng = np.random.default_rng(len(record_list) + int(augment))
     n = len(SYMBOLS) * len(record_list)
     symbols = np.tile(SYMBOLS, len(record_list))

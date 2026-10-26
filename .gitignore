@@ -19,3 +19,6 @@ artifacts/split_analysis/
 
 # Downloaded datasets
 data/
+
+# Stage 2 CV runs (artifacts/dechazal/stage2/<step>/cv/); the tables beside them are committed
+artifacts/dechazal/stage2/*/cv/
