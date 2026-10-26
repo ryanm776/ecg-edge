@@ -1,8 +1,13 @@
 # ECG Heartbeat Classifier
 
+> **Work in progress:** the model is still being developed under patient-grouped CV on the de Chazal split, and no result here is final. Current status and results are in [`artifacts/diagnosis.md`](artifacts/diagnosis.md).
+
 A dual-input (spectrogram + R-R timing) 2D CNN, trained with focal loss [3], that classifies
 MIT-BIH [4, 5] heartbeats as Normal or Abnormal, quantized to INT8 using the integer-arithmetic
-scheme of [1] and deployed on an ESP32-S3 via TensorFlow Lite Micro [2].
+scheme of [1] for an ESP32-S3 running TensorFlow Lite Micro [2].
+
+The INT8 model runs on the ESP32-S3 with synthetic input, as an on-device smoke test. Pending:
+on-device evaluation with real ECG input, and regenerating the firmware with the bn_folded model.
 
 ## Setup
 
@@ -39,18 +44,17 @@ python scripts/compare_variants.py --variants bn_folded --calib-samples 100 500 
 python scripts/compare_variants.py --variants baseline bn_folded --seeds 42 43 44   # mean ± std over seeds
 ```
 
-Each run writes to `artifacts/dechazal/variants/<run>/`; all runs are aggregated into
+Each run writes to `artifacts/dechazal/variants/<run>/` (not committed); all runs are aggregated into
 `artifacts/dechazal/variant_comparison.{csv,md}` (per-run rows, plus mean ± std over seeds, also
 in `variant_comparison_seeds.csv`). Every variant, baseline included, is trained
-from scratch. `artifacts/variants/` and `artifacts/variant_comparison.*` are kept as the
-record of the old hand-picked split.
+from scratch. `artifacts/variant_comparison.*` is kept as the record of the old hand-picked split.
 
 ### Outputs
 
 - `artifacts/ecg_multiscale_model.keras`, `artifacts/model_int8.tflite` — the trained model.
 - `artifacts/threshold.json` — the chosen decision threshold, selection strategy, and the
-  validation metrics at that threshold. This is the current operating threshold; the firmware's
-  `deployment_model/threshold.h` is generated from the same value.
+  validation metrics at that threshold. The firmware's `deployment_model/threshold.h` is
+  generated from the same value.
 - `artifacts/metrics.json` — overall test-set precision/recall/F1/confusion matrix for both the
   float and INT8 models, plus the INT8 model size in KB.
 - `artifacts/per_record_metrics.csv` — per-record breakdown (beats, TP/FP/FN/TN,
@@ -60,12 +64,17 @@ record of the old hand-picked split.
   the errors and the threshold choice.
 - `deployment_model/model_data.h`, `deployment_model/threshold.h` — what the firmware links against.
 
-### Caveat: validation set changed
+**The committed copies of these files are from the old hand-picked split**, not the de Chazal split,
+and are not a current operating point. They come from a seed-42 run of the retired baseline
+architecture, which has the known float → INT8 gap: at threshold 0.35 on that split's test set, INT8
+precision is 0.43 against 0.81 for the float model (`artifacts/diagnosis.md`, "Float → INT8 gap").
+They will be regenerated with the bn_folded model once the final-model procedure is fixed.
 
-The original notebook capped normal beats on the validation set to 600/record. This pipeline
-removes that cap so validation reflects the full MIT-BIH distribution — but `EarlyStopping`
-(`monitor="val_loss"`) now sees a larger, differently-balanced validation set each epoch, so
-training may stop at a different epoch and results won't exactly match the original notebook run.
+### Differences from the original notebook
+
+`train_pipeline.ipynb` is the superseded Colab version. Its results aren't comparable with this
+pipeline's: it used a different split, capped normal beats on validation and test at 600/record,
+tuned the threshold on test, and evaluated only the float model.
 
 ### Data split
 
@@ -122,10 +131,18 @@ DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split resu
 3. **Final model** trains on all 22 DS1 records for the median of the folds' best epochs, with no
    early stopping and no ensembling (ESP32 limits). It is evaluated once on DS2 at that threshold.
 
-Results go in `artifacts/dechazal/cv_comparison.{csv,md}`. Per-run files are in
-`artifacts/dechazal/cv/<variant>_seed<S>/`: `folds.json`, `oof_per_record_metrics.csv`, and the usual
-metrics. `folds.json` also has a diagnostic DS2 evaluation of each fold model. It shows fold-to-fold
-spread and whether the final model is in line with the fold models; it is never used for any choice.
+Tables go to `<artifacts-dir>/cv_comparison.{csv,md}` (default `artifacts/dechazal/`). Each run also
+writes `folds.json`, `oof_per_record_metrics.csv` and the usual metrics to a per-run directory, which
+is not committed. `folds.json` includes a diagnostic DS2 evaluation of each fold model. It shows
+fold-to-fold spread and whether the final model is in line with the fold models; it is never used
+for any choice.
+
+Committed results:
+- **Latest:** `artifacts/dechazal/stage2/step1b_mlii/` (Stage 2 step 1b: beat-only R-R, MLII lead
+  read by name). `oof_comparison.md` is the out-of-fold decision table against step 1, and
+  `cv_comparison.md` has the final models' DS2 results.
+- **Earlier:** `artifacts/dechazal/stage2/step1_beat_rr/` (step 1), and `artifacts/dechazal/cv_comparison.*`
+  (before the R-R fix, diagnosed in `artifacts/diagnosis.md`, "Stage 1").
 
 Folds (from `python scripts/analyze_splits.py --counts-only`):
 
