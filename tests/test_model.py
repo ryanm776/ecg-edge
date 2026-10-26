@@ -1,3 +1,5 @@
+import hashlib
+
 import numpy as np
 import tensorflow as tf
 
@@ -132,3 +134,51 @@ def test_min_int8_levels_reports_an_op_output_tensor(tmp_path):
     interpreter = tf.lite.Interpreter(model_path=str(path))
     input_names = {d["name"] for d in interpreter.get_input_details()}
     assert name not in input_names  # model inputs aren't op outputs
+
+
+# sha256 of the bn_folded binary model's initial weights (float32 bytes, in get_weights() order) at seed 42,
+# recorded from the builder as of 33cc699, before `n_classes` existed. Step 1b ran on that builder and is the
+# binary-matched cell of step 2a, so the binary model must still start from the same weights. Recorded with
+# TF 2.21.0 / Keras 3.15.1; a TF or Keras upgrade can change initializer output and would need a new digest.
+BN_FOLDED_SEED42_WEIGHTS_SHA256 = "791398219cad694ddf4d31afed923091a6285ad4f23ef2170cc937ba80d7186b"
+
+
+def _seeded_weights(seed=42, **kwargs):
+    tf.keras.utils.set_random_seed(seed)
+    return build_multiscale_bn_folded_model(SPEC_SHAPE, **kwargs).get_weights()
+
+
+def _weights_sha256(weights):
+    h = hashlib.sha256()
+    for w in weights:
+        h.update(np.ascontiguousarray(w, dtype=np.float32).tobytes())
+    return h.hexdigest()
+
+
+def test_binary_bn_folded_initial_weights_unchanged_by_n_classes():
+    assert _weights_sha256(_seeded_weights()) == BN_FOLDED_SEED42_WEIGHTS_SHA256
+    assert _weights_sha256(_seeded_weights(n_classes=1)) == BN_FOLDED_SEED42_WEIGHTS_SHA256
+
+
+def test_multiclass_bn_folded_differs_from_binary_only_in_output_layer():
+    binary = build_multiscale_bn_folded_model(SPEC_SHAPE)
+    multi = build_multiscale_bn_folded_model(SPEC_SHAPE, n_classes=3)
+
+    assert binary.output.shape[-1] == 1 and multi.output.shape[-1] == 3
+    assert multi.get_layer("output").get_config()["activation"] == "softmax"
+    assert multi.count_params() - binary.count_params() == 2 * 65  # Dense(64 -> 3) vs. Dense(64 -> 1)
+
+    # Same seed: every weight before the output layer starts identical.
+    w_binary, w_multi = _seeded_weights(), _seeded_weights(n_classes=3)
+    assert len(w_binary) == len(w_multi)
+    for a, b in zip(w_binary[:-2], w_multi[:-2]):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_multiclass_bn_folded_int8_conversion_has_no_standalone_batchnorm_ops():
+    X_spec, X_rr = _random_data(20)
+    model = build_multiscale_bn_folded_model(SPEC_SHAPE, n_classes=3)
+    ops = _op_names(convert_to_int8_tflite(model, X_spec, X_rr, num_samples=20, seed=0))
+    assert "MUL" not in ops
+    assert "ADD" not in ops
+    assert "SOFTMAX" in ops

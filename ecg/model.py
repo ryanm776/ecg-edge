@@ -38,7 +38,7 @@ def build_multiscale_ptq_model(spec_shape):
     return tf.keras.models.Model(inputs=[spec_input, rr_input], outputs=output)
 
 
-def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
+def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras, n_classes=1):
     """Same layers/hyperparameters as build_multiscale_ptq_model, but each conv is
     Conv2D (linear) -> BatchNormalization -> ReLU6, with BN applied per branch *before*
     the concatenate. BN can then be folded into the conv weights at conversion, instead
@@ -49,6 +49,10 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
     ReLU6 is always a separate `ReLU(max_value=6)` layer, never `activation="relu6"`:
     tfmot's QuantizeAwareActivation rejects relu6 as a built-in layer activation. The
     converter still fuses it into the preceding CONV_2D / FULLY_CONNECTED op.
+
+    `n_classes=1` is the binary model (one sigmoid unit, P(abnormal)); `n_classes=3` gives a softmax
+    over N/S/V. Only the output layer depends on it, so the binary model's initial weights at a given
+    seed are the same as before the option existed.
     """
     layers = keras_mod.layers
 
@@ -77,7 +81,8 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
     combined = layers.concatenate([x, y])
     z = layers.ReLU(max_value=6.0)(layers.Dense(64, kernel_regularizer="l2")(combined))
     z = layers.Dropout(0.40)(z)
-    output = layers.Dense(1, activation="sigmoid", name="output")(z)
+    activation = "sigmoid" if n_classes == 1 else "softmax"
+    output = layers.Dense(n_classes, activation=activation, name="output")(z)
 
     return keras_mod.models.Model(inputs=[spec_input, rr_input], outputs=output)
 
