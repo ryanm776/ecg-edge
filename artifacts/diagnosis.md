@@ -638,3 +638,52 @@ Full table: `artifacts/dechazal/stage2/step1_beat_rr/oof_comparison.md` (`compar
 - It is the only such record among DS1 and DS2; 102 and 104 are the others in MIT-BIH, and they are excluded as paced.
 - 114 is a top OOF FP source in both the pre-fix and the beat-only runs (counts above).
 - Like the R-R bug, this is an input-correctness issue. It is not fixed in step 1 (one change per step); it becomes step 1b.
+
+## Stage 2 step 1b results: MLII by signal name
+
+The CV baseline was retrained with record 114 read from its MLII channel (`train_cv.py --seeds 42 43 44 --artifacts-dir artifacts/dechazal/stage2/step1b_mlii`). Everything else matches step 1: beat-only R-R, binary bn_folded, focal gamma 2 / alpha 0.25. The OOF pool is the same 48,596 beats. Only record 114's 1,873 DS1 spectrograms changed (all of them).
+
+**Decision metrics: pooled OOF, INT8, per class vs. N.** Values are seeds 42 / 43 / 44, then mean ± std. The full table is `artifacts/dechazal/stage2/step1b_mlii/oof_comparison.md`, with step 1 as the reference.
+
+| Metric | Step 1 | Step 1b | Gain | Exceeds the seed spread? |
+|---|---|---|---|---|
+| S ROC-AUC | 0.795 / 0.782 / 0.793 = 0.790 ± 0.007 | 0.772 / 0.842 / 0.788 = 0.801 ± 0.037 | +0.011 | No (spread 0.037) |
+| S PR-AUC | 0.104 / 0.086 / 0.176 = 0.122 ± 0.048 | 0.096 / 0.151 / 0.232 = 0.160 ± 0.068 | +0.038 | No (spread 0.068) |
+| V ROC-AUC | 0.976 / 0.972 / 0.972 = 0.973 ± 0.002 | 0.975 / 0.973 / 0.984 = 0.977 ± 0.006 | +0.004 | No (spread 0.006) |
+| V PR-AUC | 0.879 / 0.892 / 0.912 = 0.894 ± 0.016 | 0.889 / 0.914 / 0.939 = 0.914 ± 0.025 | +0.020 | No (spread 0.025) |
+
+No float row exceeds the spread either.
+
+- **Verdict under the Stage 2 rules:**
+  - No pooled gain exceeds the seed spread. That is expected, since one record of 21 in the OOF pool changed.
+  - The fix stays in regardless, because it corrects an input bug. This run is the baseline for step 2a.
+  - The S gap is still open.
+- **Record 114 is fixed** (OOF INT8, at each run's threshold, seeds 42 / 43 / 44):
+  - **FP side:** normal-beat false positives in 114 fall from 418 / 0 / 182 to 0 / 0 / 0, out of 1,818.
+  - **FN side:** for its 43 V beats, V-vs-N ROC-AUC rises from 0.857 / 0.542 / 0.730 to 0.978 / 1.000 / 0.966, and V recall from 0.814 / 0.000 / 0.465 to 0.674 / 1.000 / 0.744.
+  - Under the swapped lead, 114's V beats were barely separable from its normal beats for seed 43.
+- **Per-record S ranking (OOF INT8 ROC-AUC):** 118, 207 and 223 stay at 0.928–0.999, and 124 stays near chance (0.555–0.697). 209 is 0.809 / 0.814 / 0.708, against step 1's 0.853 / 0.859 / 0.577.
+
+**At the selected threshold (OOF INT8; descriptive):**
+- The threshold is 0.45 for every seed (step 1: 0.50 / 0.55 / 0.40).
+- **FN side:**
+  - S recall: 0.177 / 0.156 / 0.387 = 0.240 ± 0.128 (step 1: 0.237 ± 0.134).
+  - V recall: 0.852 ± 0.034.
+  - Median S score: 0.310 ± 0.067.
+- **FP side:**
+  - FP rate on N beats: 0.010 ± 0.004 (step 1: 0.016 ± 0.006).
+  - Total OOF FPs: 603 / 235 / 529 (step 1: 985 / 447 / 687).
+  - 203 (AF/flutter) is now the only large source: 487 / 170 / 330.
+
+**DS2, final models (reported, never used for a choice):**
+- INT8 PR-AUC 0.821 / 0.820 / 0.809 = 0.817 ± 0.007 (step 1: 0.824 ± 0.087).
+- F1 0.736 / 0.780 / 0.747 = 0.754 ± 0.023 (step 1: 0.633 ± 0.177).
+- FP / FN: 739 / 1,679, 485 / 1,513 and 1,051 / 1,415.
+- S sensitivity 0.301 / 0.304 / 0.371; V sensitivity 0.877 / 0.927 / 0.919.
+- **No seed collapses this time.**
+  - AF/flutter normal beats are now the main FP source: 222 gives 551 / 322 / 545, 219 gives 25 / 4 / 193, and 202 gives 15 / 60 / 167.
+  - Wide-QRS FPs (212, 214 and 111 combined) are 38 / 58 / 28.
+  - Noise (105): 99 / 37 / 33.
+- **The deployment requirement still stands.** One set of three seeds without a collapse doesn't show that the final-model procedure is reliable.
+  - Final epochs were 13 / 15 / 26.
+  - Fold best epochs now go as low as 1 (seed 43, fold 0: `[1, 22, 24, 15, 11]`).
