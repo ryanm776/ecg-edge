@@ -118,7 +118,16 @@ Known limitations:
 
 ```bash
 python scripts/train_cv.py --seeds 42 43 44     # bn_folded only
+python scripts/train_cv.py --seeds 42 43 44 --classes nsv --loss-weights none \
+    --artifacts-dir artifacts/dechazal/stage2/<step>   # N/S/V softmax, unweighted focal loss
 ```
+
+- `--classes nsv` trains a softmax over N, S and V instead of the binary model. **The classes are N/S/V
+  only:** F and Q beats are dropped, as in the binary model, so results are not directly comparable
+  with papers that report the full five AAMI classes.
+- `--loss-weights none` drops the focal loss's class weighting. The default, `matched`, is
+  alpha 0.25 for binary, and N 0.75 / S 0.25 / V 0.25 for N/S/V.
+- One `--artifacts-dir` holds one configuration; `train_cv.py` refuses to mix them.
 
 A fixed 5-record validation set gives an unstable operating point: across seeds 42–44, bn_folded's
 DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split results").
@@ -127,7 +136,9 @@ DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split resu
 1. **5 folds** (`CV_FOLDS` in `scripts/train.py`). Each fold model trains on DS1 minus the fold and
    early-stops on the held-out fold, is converted to INT8, and scores the held-out fold.
 2. **Threshold** is selected on the pooled out-of-fold INT8 scores from 21 DS1 records. Scores go
-   through `evaluate.abnormal_score`: P(abnormal) for binary output, 1 − P(N) for multiclass.
+   through `evaluate.abnormal_score`: P(abnormal) for binary output, 1 − P(N) for multiclass. A
+   multiclass model calls a beat N below the threshold, and the likelier of S and V above it. AAMI
+   Se and +P count that call.
 3. **Final model** trains on all 22 DS1 records for the median of the folds' best epochs, with no
    early stopping and no ensembling (ESP32 limits). It is evaluated once on DS2 at that threshold.
 

@@ -519,10 +519,20 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - **Reading the result:** if multiclass wins under both weightings, the benefit is structural. If it wins under only one, structure and weighting interact.
 - **Multiclass is N/S/V only:** F and Q are still dropped. The README must say so wherever results are compared with the literature.
 - The threshold runs on `abnormal_score` (1 − P(N)), so the CV pipeline is unchanged.
+- **Implementation choices (agreed before the runs):**
+  - The binary-matched cell reuses the step 1b runs. A test pins the binary model's initial weights at seed 42 to the pre-2a builder's.
+  - "No alpha" means weight 1 on both classes, not alpha = 0.5. Alpha 0.5 would halve the data loss against the fixed L2 penalty.
+  - Decisions use OOF per-class AUC on `abnormal_score` for both models. AUCs on P(S) and P(V) are descriptive only.
+  - A multiclass beat is called N unless 1 − P(N) > threshold, otherwise the likelier of S and V. Se and +P count that call, so an S beat called V is an S miss. S→V and V→S counts are reported.
+  - The INT8 − float gap of each decision metric is reported for the multiclass runs, as for binary.
+- **Final-model calibration is deferred until after Stage 2.** Step 2a decides from OOF results only, so the final-model procedure ("Required before deployment" below) doesn't affect the decision.
 
 **Step 2b: balanced class weights.**
 - Multiclass with inverse-frequency class weights, compared with the better 2a multiclass run.
 - Once a multiclass model exists, +P for S and V is reported alongside Se.
+- **Normalize the weights** so that their mean, weighted by class frequency in the training data, is 1 (not implemented yet).
+  - 2b compares weighted with unweighted losses. Raw inverse-frequency weights would change the data loss's overall scale, and with it the balance against L2.
+  - Normalizing keeps that scale fixed, so only the class balance changes.
 
 **Step 3: R-R representation, only if a gap remains after step 2.**
 - 3a: 30-interval lookback window.
