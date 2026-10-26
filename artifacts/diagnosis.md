@@ -480,10 +480,16 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - Each change is retrained under grouped CV (`train_cv.py`) with seeds 42, 43, 44.
 - Decisions use only OOF per-class (S vs N, V vs N) ROC-AUC and PR-AUC. DS2 results are reported and never used for a choice.
 - A change counts only if its gain is larger than the measured seed-to-seed spread.
+- The decision table is `scripts/compare_oof.py`, run with the previous step's runs as the reference. Its INT8 rows decide, since INT8 is what's deployed; float rows are shown alongside.
 
 **Step 1: beat-only R-R intervals.**
 - Change: `extract_beats_from_record` computes R-R between consecutive beat annotations only (step 0), with tests.
-- Retrain the CV baseline: binary bn_folded, current focal loss (gamma 2, alpha 0.25), seeds 42–44. That run becomes the baseline for step 2.
+- Retrain the CV baseline: binary bn_folded, current focal loss (gamma 2, alpha 0.25), seeds 42–44.
+
+**Step 1b: read MLII by signal name.**
+- Added after step 1 (see "Stage 2 step 1 results"): record 114 stores V5 in channel 0, and `build_dataset` read channel 0.
+- Change: `build_dataset` selects the `MLII` channel by name, and a test checks every DS1/DS2 record.
+- Retrain the same CV baseline. That run becomes the baseline for step 2a.
 
 **Step 2a: separate class structure from weighting.** Binary vs. N/S/V multiclass under two weightings, with focal gamma = 2 in every run:
 
@@ -523,7 +529,12 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - firmware header regeneration
 - calibration sweep
 - fair QAT
-- the final model's epoch count (fold best epochs range from 5 to 56)
+
+**Required before deployment (not yet fixed): the final-model procedure.**
+- This covers the final model's epoch count (the median of the folds' best epochs, which range from 4 to 56 across the pre-fix and step 1 runs) and carrying the pooled-OOF threshold over to it.
+- In step 1, seed 44's final model produced 12,917 DS2 FPs at its OOF threshold of 0.40, while seeds 42 and 43 produced 96 and 300 (see "Stage 2 step 1 results").
+- OOF-based decisions are unaffected: they compare fold models scored on held-out patients. The deployable model, a single final model plus a transferred threshold, is not yet reliable.
+- Stage 2 continues on OOF decisions. This must be fixed before any model is exported to firmware.
 
 ### Step 4: false positives on DS1 OOF are not wide-QRS; on DS2 they have two sources
 
@@ -557,12 +568,12 @@ The CV baseline was retrained with beat-only R-R intervals (`train_cv.py --seeds
 
 | Metric | Pre-fix | Beat-only R-R | Gain | Exceeds the seed spread? |
 |---|---|---|---|---|
-| V ROC-AUC | 0.968 / 0.965 / 0.963 = 0.966 ± 0.003 | 0.976 / 0.972 / 0.972 = 0.973 ± 0.002 | +0.007 | Yes. Every new seed beats every pre-fix seed. |
+| V ROC-AUC | 0.968 / 0.965 / 0.963 = 0.966 ± 0.003 | 0.976 / 0.972 / 0.972 = 0.973 ± 0.002 | +0.008 | Yes. Every new seed beats every pre-fix seed. |
 | V PR-AUC | 0.865 / 0.849 / 0.868 = 0.860 ± 0.010 | 0.879 / 0.892 / 0.912 = 0.894 ± 0.016 | +0.034 | Yes. The lowest new seed (0.879) beats the highest pre-fix seed (0.868). |
 | S ROC-AUC | 0.781 / 0.707 / 0.826 = 0.771 ± 0.060 | 0.795 / 0.782 / 0.793 = 0.790 ± 0.007 | +0.019 | No. The gain is smaller than the pre-fix spread (0.060), and pre-fix seed 44 (0.826) beats every new seed. The spread itself shrinks about 9×. |
 | S PR-AUC | 0.078 / 0.045 / 0.101 = 0.075 ± 0.028 | 0.104 / 0.086 / 0.176 = 0.122 ± 0.048 | +0.047 | No. The gain is about the same as the new spread (0.048), and pre-fix seed 44 (0.101) beats new seed 43 (0.086). |
 
-The float AUCs agree with INT8 to within 0.018 (the largest gap is seed 43's S PR-AUC: 0.104 float vs. 0.086 INT8).
+Full table: `artifacts/dechazal/stage2/step1_beat_rr/oof_comparison.md` (`compare_oof.py`). The float AUCs agree with INT8 to within 0.018; the largest gap is seed 43's S PR-AUC, 0.104 float vs. 0.086 INT8. That gap matters for one metric. On float, the S PR-AUC gain does exceed the spread: +0.053 vs. 0.040, with seeds separated, since the lowest new seed (0.104) beats the highest pre-fix seed (0.100). On INT8 it doesn't. The INT8 rows decide.
 
 - **Verdict under the Stage 2 rules:**
   - The fix gives a real V gain.
@@ -605,4 +616,4 @@ The float AUCs agree with INT8 to within 0.018 (the largest gap is seed 43's S P
 - `build_dataset` uses `p_signal[:, 0]` as MLII. In record 114, channel 0 is V5 and channel 1 is MLII.
 - It is the only such record among DS1 and DS2; 102 and 104 are the others in MIT-BIH, and they are excluded as paced.
 - 114 is a top OOF FP source in both the pre-fix and the beat-only runs (counts above).
-- Like the R-R bug, this is an input-correctness issue. It is not fixed here: one change per step.
+- Like the R-R bug, this is an input-correctness issue. It is not fixed in step 1 (one change per step); it becomes step 1b.

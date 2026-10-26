@@ -19,6 +19,7 @@ python scripts/compare_variants.py  # float vs. INT8, bn_folded by default (--va
 python scripts/train_cv.py --seeds 42 43 44 --artifacts-dir artifacts/dechazal/stage2/<step>  # grouped CV over DS1 for bn_folded, final model on DS2 -> <artifacts-dir>/cv_comparison.*
 python scripts/analyze_splits.py    # read-only val/test split diagnosis with the saved models -> artifacts/split_analysis/
 python scripts/analyze_splits.py --counts-only  # beat composition per split only, no models (use after a split change)
+python scripts/compare_oof.py --runs <ref>=<ref-cv-dir> <new>=<new-cv-dir> --out-dir artifacts/dechazal/stage2/<step>  # Stage 2 decision table: pooled OOF per-class AUC + gain vs. seed spread
 python scripts/diagnose_s_beats.py  # read-only Stage 1 diagnosis on the CV runs, steps 0 1 2 4 (--steps 3 = slow shuffle test) -> artifacts/dechazal/stage1/
 pytest                            # unit tests (features, export, threshold selection) — no network/data needed
 ```
@@ -38,7 +39,8 @@ pytest                            # unit tests (features, export, threshold sele
 
 Stage 1 (diagnosis.md, "Stage 1") found that the S-beat failure is mainly in the training objective, plus an R-R input bug. Stage 2 fixes these in order of how fundamental they are. The full plan is in diagnosis.md, "Stage 2 plan". Follow it in order:
 
-1. Beat-only R-R intervals in `extract_beats_from_record`, then retrain the CV baseline (binary bn_folded, focal gamma 2 / alpha 0.25).
+1. Beat-only R-R intervals in `extract_beats_from_record`, then retrain the CV baseline (binary bn_folded, focal gamma 2 / alpha 0.25). Done; see diagnosis.md, "Stage 2 step 1 results".
+   **1b:** read MLII by signal name (record 114's leads are swapped), then retrain the same baseline. That run is the baseline for 2a.
 2. **2a:** binary vs. N/S/V multiclass under two weightings, with focal gamma = 2 throughout. The pairs are unweighted (no alpha vs. no class weights) and matched (alpha 0.25 vs. N 0.75 / S 0.25 / V 0.25). **2b:** multiclass with inverse-frequency class weights vs. the better 2a multiclass run. The threshold stays on `abnormal_score` (1 − P(N)). Report +P for S and V once a multiclass model exists. Multiclass is N/S/V only (F and Q are dropped); say so in the README wherever results are compared with the literature.
 3. Only if a gap remains after step 2: a 30-interval R-R lookback, then `--normalize-rr`.
 4. Global average pooling instead of Flatten. Flatten → Dense holds 197,184 of the ~202.2k parameters.
@@ -49,8 +51,11 @@ Stage 1 (diagnosis.md, "Stage 1") found that the S-beat failure is mainly in the
 - Retrain under grouped CV with seeds 42, 43, 44.
 - Decide only on OOF per-class (S vs N, V vs N) ROC-AUC and PR-AUC. Never use DS2 for a choice.
 - A change counts only if its gain exceeds the measured seed-to-seed spread.
+- Make the decision table with `scripts/compare_oof.py`, using the previous step's runs as the reference. The INT8 rows decide.
 
-**Parked:** Pan-Tompkins, DS2 sensitivity analysis, pruning, firmware header regeneration, calibration sweep, fair QAT, and the final model's epoch count.
+**Parked:** Pan-Tompkins, DS2 sensitivity analysis, pruning, firmware header regeneration, calibration sweep, and fair QAT.
+
+**Required before deployment (not yet fixed):** the final-model procedure, meaning the epoch count (median of the folds' best epochs) and the transfer of the pooled-OOF threshold to the final model. In step 1, seed 44's final model gave 12,917 DS2 FPs at its OOF threshold; seeds 42 and 43 gave 96 and 300. OOF decisions are unaffected. Don't export a model to firmware until this is fixed.
 
 ## Working with the firmware (`deployment_model/deployment_model.ino`)
 
