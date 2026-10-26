@@ -1,6 +1,23 @@
-# Float → INT8 gap: diagnosis
+# ECG classifier: investigation and experiment log
 
-> **Old split.** Every result in this file except the final section, "de Chazal split results", and every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …), uses the old hand-picked train/val/test split. Results on the de Chazal split go in `artifacts/dechazal/` (see README.md, "Data split").
+> **Current status:** Stage 2 is in progress. The latest results are in the last section, "Stage 2 step 1b results: MLII by signal name". That run is the reference for step 2a, binary vs. N/S/V multiclass. The remaining steps are in "Stage 2 plan". No model has been exported to firmware since the old-split baseline.
+
+## Contents
+
+Investigations in the order they were run, each with its outcome:
+
+- **Float → INT8 gap** (old split): the root cause is BatchNorm after ReLU6, which can't be folded into the conv. Fixed by the bn_folded architecture (Conv → BN → ReLU6). QAT is parked.
+- **Validation/test mismatch** (old split): validation's abnormal beats were mostly one patient's S beats, test's were mostly V, and train had no LBBB. This led to the switch to the de Chazal split.
+- **de Chazal split results:** bn_folded matches the baseline's float PR-AUC on DS2 with ~10× less seed variance and no INT8 gap, so it is the architecture going forward. A fixed 5-record validation set gives an unstable threshold.
+- **Grouped CV results:** patient-grouped CV over DS1 stabilizes the threshold (0.50 for all three seeds). S beats from unseen patients are almost never detected (OOF S recall 0.08–0.11).
+- **Stage 1: S-beat and FP diagnosis:** the S failure lies mainly in the training objective, plus an R-R input bug (intervals spanning non-beat annotations).
+- **Stage 2 plan:** the fixes in order, one at a time, each decided on OOF per-class AUC against the seed-to-seed spread.
+- **Stage 2 step 1 results: beat-only R-R:** a real V gain (INT8 OOF V PR-AUC 0.860 → 0.894); the S gain is within the seed spread.
+- **Stage 2 step 1b results: MLII by signal name:** record 114's swapped leads are fixed, with no pooled gain beyond the seed spread. The S gap is still open.
+
+> **Old split.** "Float → INT8 gap" and "Validation/test mismatch" use the old hand-picked train/val/test split, as does every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …). Everything from "de Chazal split results" on uses the de Chazal split; those results are in `artifacts/dechazal/` (see README.md, "Data split").
+
+## Float → INT8 gap
 
 Baseline model (`ecg_multiscale_model.keras` / `model_int8.tflite`, seed 42) on test, threshold 0.35:
 
@@ -14,7 +31,7 @@ Baseline model (`ecg_multiscale_model.keras` / `model_int8.tflite`, seed 42) on 
 
 All numbers below were reproduced with seed 42, so the PTQ calibration indices are identical to the ones `scripts/train.py` used.
 
-## 1. Float32 TFLite matches Keras
+### 1. Float32 TFLite matches Keras
 
 Converting the same model to an unquantized float32 `.tflite` (17,466 test beats):
 
@@ -24,7 +41,7 @@ Converting the same model to an unquantized float32 `.tflite` (17,466 test beats
 
 So the conversion pipeline isn't the cause.
 
-## 2. Input quantization parameters
+### 2. Input quantization parameters
 
 | Tensor | Scale | Zero point | Representable range |
 |---|---|---|---|
@@ -35,7 +52,7 @@ So the conversion pipeline isn't the cause.
 - The `rr_input` upper bound (2.296) is the calibration sample's max `pre_post_ratio`.
 - Spectrograms are min-max normalized to [0, 1], so that input never clips.
 
-## 3. R-R values outside the representable range
+### 3. R-R values outside the representable range
 
 | Set | Beats | Values clipped | Beats with any clip | Per feature (pre_rr / post_rr / local_mean / rr_ratio / pre_post_ratio) |
 |---|---|---|---|---|
@@ -48,7 +65,7 @@ So the conversion pipeline isn't the cause.
 
 Record 232's max values are pre/post_rr 5.87 s, rr_ratio 4.64 and pre_post_ratio 12.4. Train's max `pre_post_ratio` is 8.76.
 
-## 4. Fake-quantizing the inputs doesn't reproduce the gap
+### 4. Fake-quantizing the inputs doesn't reproduce the gap
 
 The float Keras model is run with inputs passed through quantize→dequantize using the INT8 model's own input scale/zero point, which reproduces the clipping and rounding exactly. Test set, threshold 0.35:
 
@@ -79,7 +96,7 @@ Per-record test FPs (float → INT8):
 | float | 0 | 124 | 3 | 8 | 3 | 30 | 79 | 35 |
 | INT8 | 42 | 118 | 56 | 10 | 5 | 78 | 1,146 | 47 |
 
-## 5. Root cause: BatchNorm after ReLU6 can't be folded
+### 5. Root cause: BatchNorm after ReLU6 can't be folded
 
 `ecg/model.py` uses Conv2D(relu6) → BatchNormalization in both conv stages. The parallel branches are concatenated first, then BN. BN after an activation can't be folded into the conv weights, so the converter emits it as standalone INT8 `MUL` + `ADD` ops.
 
@@ -112,7 +129,7 @@ By `batch_normalization_1`, the error exceeds the signal's own spread, so the sp
 
 The per-op TFLite `QuantizationDebugger` (local error only, not accumulated) shows every op at ≤ 0.34 LSB RMSE except the R-R `dense` (0.98 LSB). The problem isn't any single op being badly calibrated. It's that a ~4-level tensor gets amplified by an unfolded BN.
 
-## 6. Calibration size is a secondary effect
+### 6. Calibration size is a secondary effect
 
 Re-running PTQ with larger shuffled calibration sets (test FP @ 0.35):
 
@@ -122,17 +139,17 @@ Re-running PTQ with larger shuffled calibration sets (test FP @ 0.35):
 | 1,000 | 1,218 | 936 | 1,135 | 0.482 |
 | 5,000 | 1,271 | 975 | 1,136 | 0.472 |
 
-## 7. QAT compatibility (tfmot)
+### 7. QAT compatibility (tfmot)
 
 - Versions: TF 2.21.0, Keras 3.15.1, tf_keras 2.21.0, tensorflow-model-optimization 0.8.1. tfmot imports fine.
 - Importing tfmot makes `tf.keras` resolve to `tf_keras` (Keras 2) for the whole process. QAT therefore has to run in its own process, separate from the Keras 3 training path.
 - `tfmot.quantization.keras.quantize_model` on the current architecture fails both with and without `TF_USE_LEGACY_KERAS=1`: `Layer batch_normalization ... is not supported`. Neither BN placement (after Concatenate, or after Conv+ReLU6) is supported by the default 8-bit registry.
 
-## 8. Unrelated firmware bug found along the way
+### 8. Unrelated firmware bug found along the way
 
 The INT8 flatbuffer's subgraph inputs are `[rr_input (tensor 0), spectrogram_input (tensor 1)]`. `deployment_model.ino` bound `input(0)` as the spectrogram, so on device the two inputs were swapped, and the `min(bytes, 5)` bounds check hid it. This is fixed in commit f94682d: inputs are now bound by element count.
 
-## Next step
+### Next step (as planned at the time)
 
 Compare, on the same seed:
 
@@ -142,7 +159,7 @@ Compare, on the same seed:
 
 Then add R-R normalization to the better of d/e as a separate row. Results will go in `variant_comparison.md`.
 
-## QAT follow-up (parked)
+### QAT follow-up (parked)
 
 - **QAT isn't needed for the current architecture.** BN folding alone closed the float→INT8 gap. In Run 1, bn_folded PTQ has float precision 0.853 vs INT8 0.852, FP 177 vs 179, and record 214 FP 6 vs 6. Its narrowest tensor spans 230 INT8 levels, up from the baseline's 5.
 - **The existing QAT run isn't a fair test of QAT.** Its float model, trained from scratch under tf_keras with the same architecture, data and seed as bn_folded, underperformed before any QAT fine-tuning:
