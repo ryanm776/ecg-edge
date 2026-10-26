@@ -529,6 +529,27 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - firmware header regeneration
 - calibration sweep
 - fair QAT
+- more training data from other PhysioNet databases (below)
+
+**Parked idea: add training data from other PhysioNet databases.** Not implemented.
+- **Why:** DS1 has only 22 patients, so no single validation group is representative, and fold models vary a lot with the patients they train on.
+  - Only 2 of the 22 are LBBB patients (109, 207).
+  - Record 209 holds 383 of DS1's 944 S beats (41%), counted over all annotations.
+  - Fold-model DS2 PR-AUC (diagnostic only, `folds.json`) ranges from 0.548 to 0.870 in the pre-fix runs, and from 0.683 to 0.873 in step 1.
+- **Candidates:**
+  - MIT-BIH Supraventricular Arrhythmia Database (SVDB): 78 recordings, rich in S beats, 128 Hz.
+  - St. Petersburg INCART: 75 recordings from 32 patients, 12-lead, 257 Hz.
+- **Rule:** the new data goes into training only. DS2 stays the untouched test set, so results stay comparable with de Chazal-split papers.
+- **Work needed:**
+  - Resample to 360 Hz.
+  - Pick the lead closest to MLII: SVDB's leads differ, and INCART would use lead II. Add a test, like the step 1b MLII check.
+  - Check that the annotation symbols map to the AAMI classes correctly (`SYMBOL_MAP`, `AAMI_CLASSES`).
+  - Group CV folds by patient, since INCART has several recordings per patient.
+- **When:** after the Stage 2 experiments, so there is a DS1-only baseline to compare against.
+- **Success test:** pooled OOF S-beat PR-AUC (S vs. N) improves by more than the seed spread (seeds 42–44).
+  - Also recorded, but not pass/fail: S recall at the operating point that gives 0.90 overall abnormal recall on the pooled OOF scores. `compare_oof.py` doesn't report this yet; it reports S recall at the selected threshold.
+  - The OOF pool stays the DS1 records; external recordings are only ever in training.
+  - Decisions come from OOF results (`compare_oof.py`, INT8 rows), never DS2.
 
 **Required before deployment (not yet fixed): the final-model procedure.**
 - This covers the final model's epoch count (the median of the folds' best epochs, which range from 4 to 56 across the pre-fix and step 1 runs) and carrying the pooled-OOF threshold over to it.

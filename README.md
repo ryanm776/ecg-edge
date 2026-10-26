@@ -178,6 +178,7 @@ known deployment constraints).
 
 - Pan-Tompkins R-peak detection on device, replacing ground-truth annotations [7] (see CLAUDE.md deployment constraints)
 - Pruning for further model compression [9]
+- More training data from other PhysioNet databases [5]: the MIT-BIH Supraventricular Arrhythmia Database (78 recordings, rich in S beats, 128 Hz) and St. Petersburg INCART (75 recordings from 32 patients, 12-lead, 257 Hz). DS1 has only 22 patients, 2 of them with LBBB, and record 209 holds about 41% of its S beats. The new data would go into training only, so DS2 stays the untouched test set and results stay comparable with de Chazal-split papers [10]. It needs resampling to 360 Hz, the lead closest to MLII (lead II for INCART), the annotation symbols mapped to the AAMI classes, and CV folds grouped by patient (INCART has several recordings per patient). Planned after the current experiments, against the DS1-only baseline.
 - Tiered cloud data pipeline (edge buffering → Redis → PostgreSQL → object storage) for streaming results, following [8]
 
 ## Related work
