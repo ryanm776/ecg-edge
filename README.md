@@ -1,5 +1,7 @@
 # ECG Heartbeat Classifier
 
+> **Work in progress:** the model is still being developed under patient-grouped CV on the de Chazal split, and no result here is final. Current status and results are in [`artifacts/diagnosis.md`](artifacts/diagnosis.md).
+
 A dual-input (spectrogram + R-R timing) 2D CNN, trained with focal loss [3], that classifies
 MIT-BIH [4, 5] heartbeats as Normal or Abnormal, quantized to INT8 using the integer-arithmetic
 scheme of [1] and deployed on an ESP32-S3 via TensorFlow Lite Micro [2].
