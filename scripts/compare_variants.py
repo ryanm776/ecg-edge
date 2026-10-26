@@ -63,6 +63,8 @@ class Table:
     columns: list
     summary_columns: list
     notes: list = field(default_factory=list)
+    # Columns added after some runs were written: a run without them gets NaN instead of being skipped.
+    optional_columns: list = field(default_factory=list)
 
 
 VARIANT_TABLE = Table(
@@ -176,6 +178,9 @@ def aggregate(artifacts_dir, table=VARIANT_TABLE):
     for p in paths:
         run = os.path.basename(os.path.dirname(p))
         frame = pd.read_csv(p, dtype={"variant": str}).assign(run=run)
+        for c in table.optional_columns:
+            if c not in frame.columns:
+                frame[c] = float("nan")
         missing = [c for c in table.columns if c not in frame.columns]
         if missing:
             print(f"Skipping {run}: written by an older train.py (missing {', '.join(missing)}); re-run it to include it.")

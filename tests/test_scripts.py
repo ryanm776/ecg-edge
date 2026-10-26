@@ -295,3 +295,78 @@ def test_val_per_record_rows_reconcile_with_overall_val_metrics():
             alone, _ = evaluate.evaluate_predictions(y_val[mask], probs[mask], record_ids[mask], t)
             assert r["f1"] == alone["f1"]
             assert (r["fp"], r["fn"]) == (alone["confusion_matrix"][0][1], alone["confusion_matrix"][1][0])
+
+
+def test_comparison_rows_multiclass_se_pp_and_mixups_follow_predicted_classes():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from ecg import evaluate
+    from ecg.features import aami_class_metrics, sv_confusion
+
+    train = _load("train")
+    rng = np.random.default_rng(1)
+    symbols = np.array(["N"] * 60 + ["V"] * 25 + ["A"] * 15 + ["J"] * 5, dtype=object)
+    y_test = (symbols != "N").astype(int)
+    record_ids = np.array(["202", "100", "105"] * 35, dtype=object)
+    y_val = np.array([0] * 30 + [1] * 30)
+    preds, class_probs = {}, {}
+    for name in ("float", "int8"):
+        class_probs[name] = rng.dirichlet([1, 1, 1], size=len(y_test))
+        val_probs = rng.uniform(size=len(y_val))
+        _, sweep = evaluate.select_threshold(y_val, val_probs)
+        preds[name] = (val_probs, sweep, evaluate.abnormal_score(class_probs[name]))
+    args = SimpleNamespace(variant="bn_folded", calib_samples=100, target_recall=0.95, seed=42)
+
+    df = train.comparison_rows("bn_folded+nsv", args, y_val, y_test, record_ids, symbols, preds,
+                               threshold=0.6, float_threshold=0.45, tflite_kb=10.0, levels=200,
+                               evaluate=evaluate, class_probs=class_probs)
+
+    assert (df["variant"] == "bn_folded+nsv").all()
+    for _, row_ in df.iterrows():
+        pred_classes = evaluate.predicted_classes(class_probs[row_["model"]], row_["threshold"])
+        aami = aami_class_metrics(symbols, pred_classes=pred_classes)
+        assert (row_["se_V"], row_["pp_V"]) == aami["V"][1:]
+        assert (row_["se_S"], row_["pp_S"]) == aami["S"][1:]
+        assert (row_["S_as_V"], row_["V_as_S"]) == tuple(sv_confusion(symbols, pred_classes).values())
+        # N vs. abnormal columns stay on the abnormal score, so they reconcile with the class calls.
+        called_abnormal = pred_classes != "N"
+        assert row_["tp"] == int((called_abnormal & (y_test == 1)).sum())
+        assert row_["fp"] == int((called_abnormal & (y_test == 0)).sum())
+        assert row_["recall_ventricular"] == called_abnormal[symbols == "V"].mean()
+        # Every true V is called V, S or N: Se_V + V_as_S share + V misses add up to 1.
+        n_v = int((symbols == "V").sum())
+        v_missed = int(((symbols == "V") & ~called_abnormal).sum())
+        assert np.isclose(row_["se_V"] + (row_["V_as_S"] + v_missed) / n_v, 1.0)
+
+
+def test_comparison_rows_binary_has_no_mixup_counts():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from ecg import evaluate
+
+    train = _load("train")
+    rng = np.random.default_rng(2)
+    symbols = np.array(["N"] * 30 + ["V"] * 10 + ["A"] * 10, dtype=object)
+    y = (symbols != "N").astype(int)
+    _, sweep = evaluate.select_threshold(y, rng.uniform(size=len(y)))
+    probs = rng.uniform(size=len(y))
+    preds = {m: (probs, sweep, probs) for m in ("float", "int8")}
+    args = SimpleNamespace(variant="bn_folded", calib_samples=100, target_recall=0.95, seed=42)
+
+    df = train.comparison_rows("bn_folded", args, y, y, np.array(["100"] * len(y), dtype=object), symbols, preds,
+                               threshold=0.5, float_threshold=0.5, tflite_kb=10.0, levels=200, evaluate=evaluate)
+
+    assert df["S_as_V"].isna().all() and df["V_as_S"].isna().all()
+
+
+def test_fit_model_uses_a_given_loss():
+    model, tf, ecg_model, calls = _fake_fit_env([0.5, 0.4])
+    train = _load("train")
+
+    train.fit_model(model, tf, ecg_model, "x", "y", ("xv", "yv"), lr=0.001, epochs=5, batch_size=64, loss="custom")
+
+    assert calls["compile"]["loss"] == "custom"
