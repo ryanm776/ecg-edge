@@ -17,6 +17,7 @@ from ecg.features import (
     fit_rr_normalizer,
     nsv_labels,
     rr_quantile_ratio,
+    sv_confusion,
     type_recall,
 )
 
@@ -66,6 +67,14 @@ def test_nsv_labels_follow_aami_classes_and_agree_with_binary_labels():
     for sym, label, cls in zip(symbols, labels, aami_class(symbols)):
         assert NSV_CLASSES[label] == cls
         assert (label > 0) == (SYMBOL_MAP[sym] == 1)
+
+
+def test_sv_confusion_counts_s_v_mixups_only():
+    #            true: N  N  N  S  S  S  V  V  V
+    symbols = np.array(["N", "R", "N", "A", "J", "A", "V", "E", "V"], dtype=object)
+    pred = np.array(["N", "S", "V", "S", "V", "V", "V", "S", "N"], dtype=object)
+
+    assert sv_confusion(symbols, pred) == {"S_as_V": 2, "V_as_S": 1}
 
 
 def test_nsv_labels_reject_symbols_outside_n_s_v():

@@ -95,6 +95,13 @@ def aami_class_metrics(symbols, abnormal_pred=None, pred_classes=None):
     return out
 
 
+def sv_confusion(symbols, pred_classes):
+    """S <-> V mix-ups of a multiclass model: {"S_as_V": true S called V, "V_as_S": true V called S}."""
+    true, pred = aami_class(symbols), np.asarray(pred_classes)
+    return {"S_as_V": int(((true == "S") & (pred == "V")).sum()),
+            "V_as_S": int(((true == "V") & (pred == "S")).sum())}
+
+
 def bandpass_filter(raw_signal, fs, low=0.5, high=40.0):
     nyq = 0.5 * fs
     b, a = signal.butter(2, [low / nyq, high / nyq], btype="band")

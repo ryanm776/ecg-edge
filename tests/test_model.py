@@ -3,7 +3,7 @@ import hashlib
 import numpy as np
 import tensorflow as tf
 
-from ecg.evaluate import min_int8_levels
+from ecg.evaluate import min_int8_levels, predict_tflite
 from ecg.export import convert_to_int8_tflite
 from ecg.model import (
     build_multiscale_bn_folded_model,
@@ -182,3 +182,21 @@ def test_multiclass_bn_folded_int8_conversion_has_no_standalone_batchnorm_ops():
     assert "MUL" not in ops
     assert "ADD" not in ops
     assert "SOFTMAX" in ops
+
+
+def test_predict_tflite_shapes_and_multiclass_probabilities_sum_to_one(tmp_path):
+    X_spec, X_rr = _random_data(20)
+    for n_classes, expected_shape in ((1, (20,)), (3, (20, 3))):
+        model = build_multiscale_bn_folded_model(SPEC_SHAPE, n_classes=n_classes)
+        path = tmp_path / f"model{n_classes}.tflite"
+        path.write_bytes(convert_to_int8_tflite(model, X_spec, X_rr, num_samples=20, seed=0))
+
+        probs = predict_tflite(path, X_spec, X_rr)
+
+        assert probs.shape == expected_shape
+        assert np.all((probs >= 0) & (probs <= 1))
+        if n_classes == 3:
+            # INT8 softmax output has scale 1/256: allow one step of rounding per column.
+            np.testing.assert_allclose(probs.sum(axis=1), 1.0, atol=3 / 256)
+            float_probs = model.predict([X_spec, X_rr], verbose=0)
+            np.testing.assert_allclose(probs, float_probs, atol=0.05)
