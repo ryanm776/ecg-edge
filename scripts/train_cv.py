@@ -80,10 +80,20 @@ def parse_args():
     parser.add_argument("--min-precision", type=float, default=0.90)
     parser.add_argument("--target-recall", type=float, default=0.95)
     parser.add_argument("--aggregate-only", action="store_true", help="Skip the runs; just rebuild the tables.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Replace existing runs for these seeds (refused by default; earlier runs may be inputs "
+                             "to other analyses, e.g. diagnose_s_beats.py reads artifacts/dechazal/cv/).")
     args = parser.parse_args()
     if len(set(args.seeds)) != len(args.seeds):
         parser.error("--seeds has duplicates")
+    existing = [run_dir(args, s) for s in args.seeds if os.path.exists(os.path.join(run_dir(args, s), "folds.json"))]
+    if existing and not args.aggregate_only and not args.overwrite:
+        parser.error(f"runs already exist: {existing}; pass a new --artifacts-dir or --overwrite")
     return args
+
+
+def run_dir(args, seed):
+    return os.path.join(args.artifacts_dir, "cv", f"{args.variant}_seed{seed}")
 
 
 def fold_report(k, records, best_epoch, y_ho, symbols_ho, oof_int8, y_test, test_int8, threshold, evaluate):
@@ -117,7 +127,7 @@ def fold_report(k, records, best_epoch, y_ho, symbols_ho, oof_int8, y_test, test
 def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, cv):
     X_ev_spec, X_ev_rr, y_ev, rec_ev, sym_ev = ds1_eval
     X_te_spec, X_te_rr, y_te, rec_te, sym_te = ds2
-    out_dir = os.path.join(args.artifacts_dir, "cv", f"{args.variant}_seed{seed}")
+    out_dir = run_dir(args, seed)
     os.makedirs(os.path.join(out_dir, "folds"), exist_ok=True)
 
     # Training view of DS1: normal-beat cap and augmentation, like train.py's train set.
@@ -149,7 +159,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     pooled_float, covered = cv.pool_oof(oof_float, held_out_masks)
     pooled_int8, _ = cv.pool_oof(oof_int8, held_out_masks)
-    y_oof, rec_oof = y_ev[covered], rec_ev[covered]
+    y_oof, rec_oof, sym_oof = y_ev[covered], rec_ev[covered], sym_ev[covered]
     pooled_float, pooled_int8 = pooled_float[covered], pooled_int8[covered]
 
     threshold, sweep = evaluate.select_threshold(
@@ -180,7 +190,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     test_float = evaluate.abnormal_score(model.predict([X_te_spec, X_te_rr]))
     test_int8 = evaluate.abnormal_score(evaluate.predict_tflite(tflite_path, X_te_spec, X_te_rr))
-    oof = SimpleNamespace(y=y_oof, record_ids=rec_oof, float=pooled_float, int8=pooled_int8,
+    oof = SimpleNamespace(y=y_oof, record_ids=rec_oof, symbols=sym_oof, float=pooled_float, int8=pooled_int8,
                           threshold=threshold, sweep=sweep, float_threshold=float_threshold, float_sweep=float_sweep)
     write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, test_float, test_int8,
                   tflite_bytes, tflite_path, evaluate)
@@ -243,7 +253,7 @@ def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, t
         oof.y, oof.record_ids, preds, threshold, float_threshold, evaluate,
     ).to_csv(os.path.join(out_dir, "oof_per_record_metrics.csv"), index=False)
     np.savez(os.path.join(out_dir, "oof_predictions.npz"), record_ids=oof.record_ids.astype(str), y=oof.y,
-             float=oof.float, int8=oof.int8)
+             symbols=oof.symbols.astype(str), float=oof.float, int8=oof.int8)
 
 
 def main():

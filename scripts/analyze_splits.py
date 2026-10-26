@@ -36,7 +36,7 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from ecg.features import (  # noqa: E402  (numpy/scipy only)
-    ABNORMAL_TYPES, SUPRAVENTRICULAR, VENTRICULAR, WINDOW_SIZE, type_recall,
+    ABNORMAL_TYPES, SUPRAVENTRICULAR, VENTRICULAR, WINDOW_SIZE, beat_annotation_mask, type_recall,
 )
 from train import (  # noqa: E402  (numpy/pandas only)
     CV_ALWAYS_TRAIN, CV_FOLDS, DS1_RECORDS, DS2_RECORDS, TEST_RECORDS, TRAIN_RECORDS, VAL_RECORDS,
@@ -68,11 +68,12 @@ def parse_args():
 
 def usable_symbol_counts(samples, symbols, signal_len, window_size=WINDOW_SIZE):
     """Count beats per symbol under the same usability rule as extract_beats_from_record
-    (skip the first/last annotation and beats whose window doesn't fit), but for every
-    symbol in COUNT_SYMBOLS, including F and Q, which the dataset drops."""
+    (a beat annotation on each side, and a window that fits), but for every symbol in
+    COUNT_SYMBOLS, including F and Q, which the dataset drops."""
     half_window = window_size // 2
     counts = Counter()
-    for i in range(1, len(samples) - 1):
+    beats = np.flatnonzero(beat_annotation_mask(symbols))
+    for i in beats[1:-1]:
         sym = symbols[i]
         if sym not in COUNT_SYMBOLS:
             continue

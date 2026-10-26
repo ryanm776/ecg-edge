@@ -170,3 +170,42 @@ def test_extract_beats_returns_symbols_aligned_with_labels_and_augmentation():
     assert syms == ["V", "V", "N", "N", "A", "A"]  # each beat plus its jitter duplicate
     assert y == [1, 1, 0, 0, 1, 1]
     assert len(record_ids) == len(syms)
+
+
+def _record_with_nonbeat_annotations():
+    fs = 360
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(10 * fs) / fs)
+    # "+" leads the record and sits mid-record, "~" is noise, Q is a beat the dataset doesn't extract.
+    # Beats: 200 500 700(A) 1100 1400(Q) 1700 2000(V) 2300 2600 -> beat R-R 300 200 400 300 300 300 300 300.
+    samples = np.array([5, 200, 500, 700, 1000, 1100, 1400, 1700, 1800, 2000, 2300, 2600])
+    symbols = ["+", "N", "N", "A", "+", "N", "Q", "N", "~", "V", "N", "N"]
+    return signal, fs, samples, symbols
+
+
+def test_extract_beats_rr_runs_between_beat_annotations_only():
+    signal, fs, samples, symbols = _record_with_nonbeat_annotations()
+    beats = [i for i, s in enumerate(symbols) if s in BEAT_SYMBOLS]
+    rr_beat = np.diff(samples[beats]) / fs
+
+    _, X_rr, _, _, syms = extract_beats_from_record(signal, fs, samples, symbols, "r")
+
+    # The first beat (200) has no beat before it and is dropped; Q at 1400 isn't extracted.
+    assert syms == ["N", "A", "N", "N", "V", "N"]
+    kept_j = [j for j in range(1, len(beats) - 1) if symbols[beats[j]] in SYMBOL_MAP]
+    assert X_rr == [compute_rr_timing_features(rr_beat, j) for j in kept_j]
+    # 1100 follows the mid-record "+" at 1000, but its pre_rr spans back to the A at 700.
+    assert X_rr[2][0] == 400 / fs
+    # Q is a beat, so it is 1700's previous beat for R-R even though Q itself isn't extracted.
+    assert X_rr[3][0] == 300 / fs
+
+
+def test_extract_beats_rr_from_all_annotations_reproduces_the_pre_fix_features():
+    signal, fs, samples, symbols = _record_with_nonbeat_annotations()
+    rr_all = np.diff(samples) / fs
+
+    _, X_rr, _, _, syms = extract_beats_from_record(signal, fs, samples, symbols, "r", rr_from_all_annotations=True)
+
+    kept_i = [i for i in range(1, len(samples) - 1) if symbols[i] in SYMBOL_MAP]
+    assert syms == [symbols[i] for i in kept_i]
+    assert X_rr == [compute_rr_timing_features(rr_all, i) for i in kept_i]
+    assert X_rr[3][0] == 100 / fs  # 1100's pre_rr ends at the "+" annotation
