@@ -548,3 +548,61 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 
 - **Wide-QRS false positives depend heavily on the seed.** For example, 214 has 282 / 412 / 12, even though every fold model handles DS1's L and R beats. This looks like generalization variance across a few bundle-branch-block patients (4 in DS1), not missing coverage.
 - **The AF/flutter normal beats are an R-R problem, not a shape problem.** An irregular rhythm makes normal beats look premature. 222 is also one of the records most affected by the annotation bug (43.6% of beats). In DS1, 203 (AFIB 21, AFL 2) is the top OOF FP source.
+
+## Stage 2 step 1 results: beat-only R-R
+
+The CV baseline was retrained with beat-only R-R intervals (`train_cv.py --seeds 42 43 44 --artifacts-dir artifacts/dechazal/stage2/step1_beat_rr`). Everything else is unchanged: binary bn_folded, focal gamma 2 / alpha 0.25. The pre-fix runs are `artifacts/dechazal/cv/`. The OOF pool shrinks from 48,605 to 48,596 beats: 9 normal beats at record edges are no longer usable.
+
+**Decision metrics: pooled OOF, INT8, per class vs. N.** Values are seeds 42 / 43 / 44, then mean ± std.
+
+| Metric | Pre-fix | Beat-only R-R | Gain | Exceeds the seed spread? |
+|---|---|---|---|---|
+| V ROC-AUC | 0.968 / 0.965 / 0.963 = 0.966 ± 0.003 | 0.976 / 0.972 / 0.972 = 0.973 ± 0.002 | +0.007 | Yes. Every new seed beats every pre-fix seed. |
+| V PR-AUC | 0.865 / 0.849 / 0.868 = 0.860 ± 0.010 | 0.879 / 0.892 / 0.912 = 0.894 ± 0.016 | +0.034 | Yes. The lowest new seed (0.879) beats the highest pre-fix seed (0.868). |
+| S ROC-AUC | 0.781 / 0.707 / 0.826 = 0.771 ± 0.060 | 0.795 / 0.782 / 0.793 = 0.790 ± 0.007 | +0.019 | No. The gain is smaller than the pre-fix spread (0.060), and pre-fix seed 44 (0.826) beats every new seed. The spread itself shrinks about 9×. |
+| S PR-AUC | 0.078 / 0.045 / 0.101 = 0.075 ± 0.028 | 0.104 / 0.086 / 0.176 = 0.122 ± 0.048 | +0.047 | No. The gain is about the same as the new spread (0.048), and pre-fix seed 44 (0.101) beats new seed 43 (0.086). |
+
+The float AUCs agree with INT8 to within 0.018 (the largest gap is seed 43's S PR-AUC: 0.104 float vs. 0.086 INT8).
+
+- **Verdict under the Stage 2 rules:**
+  - The fix gives a real V gain.
+  - S doesn't improve by more than the seed noise. The S gap is still open, so step 2 goes ahead as planned.
+  - The fix stays in regardless, because it corrects an input bug. This run is the baseline for step 2a.
+- **Per-record S ranking (OOF INT8 ROC-AUC, seeds 42 / 43 / 44):**
+  - 118: 0.992 / 0.978 / 0.999 (pre-fix 0.843 / 0.964 / 0.960)
+  - 207: 0.995 / 0.987 / 0.992
+  - 223: 0.978 / 0.992 / 0.990
+  - 220: 0.846 / 0.914 / 0.983 (pre-fix 0.994 / 0.974 / 0.977)
+  - 209 is still unstable from seed to seed: 0.853 / 0.859 / 0.577 (pre-fix 0.583 / 0.869 / 0.964).
+  - 124 is still near chance: 0.630 / 0.510 / 0.664.
+
+**At the selected threshold (OOF INT8; descriptive, not decision metrics):**
+- The threshold is no longer the same for every seed: it is 0.50 / 0.55 / 0.40 (pre-fix: 0.50 for all three).
+- **FN side:**
+  - S recall: 0.238 / 0.103 / 0.371 = 0.237 ± 0.134 (pre-fix 0.094 ± 0.014).
+  - V recall: 0.853 ± 0.024 (pre-fix 0.772 ± 0.007).
+  - Median S score: 0.279 ± 0.052 (pre-fix 0.233 ± 0.033).
+- **FP side:**
+  - FP rate on N beats: 0.016 ± 0.006 (pre-fix 0.012 ± 0.002).
+  - Total OOF FPs: 985 / 447 / 687 (pre-fix 537 / 638 / 443).
+  - Top sources: 203 (AF/flutter) with 493 / 366 / 411 (pre-fix 225 / 152 / 65), and 114 with 418 / ≤7 / 182 (pre-fix 105 / 149 / 286).
+
+**DS2, final models (reported, never used for a choice):**
+- INT8 PR-AUC 0.925 / 0.770 / 0.777 = 0.824 ± 0.087 (pre-fix 0.748 ± 0.011).
+- F1 0.716 / 0.753 / 0.429 = 0.633 ± 0.177 (pre-fix 0.690 ± 0.036).
+- S sensitivity 0.190 / 0.132 / 0.974; V sensitivity 0.784 / 0.929 / 0.969.
+- **Seed 44 collapses at its OOF threshold.** It produces 12,917 FPs at t = 0.40:
+  - wide QRS: 212 (R) 1,863, 214 (L) 1,753, 111 (L) 746
+  - AF/flutter: 222 1,305, 219 844, 202 679
+  - noise: 105 155
+- **Seeds 42 and 43 have few FPs:** 96 and 300.
+  - 222: 83 / 239
+  - 105: 10 / 37
+  - Wide QRS: 212, 214 and 111 together 2 / 13
+- **DS2 variance went up, not down.** OOF-to-DS2 threshold transfer is fragile: a threshold 0.10 lower, plus a final model trained for a different epoch count (23), turned a ranking with ROC-AUC 0.953 into 12,917 FPs. This ties into the parked final-model epoch-count item. It's recorded here and not acted on, because DS2 is never used for a choice.
+
+**New input finding: record 114's leads are swapped.**
+- `build_dataset` uses `p_signal[:, 0]` as MLII. In record 114, channel 0 is V5 and channel 1 is MLII.
+- It is the only such record among DS1 and DS2; 102 and 104 are the others in MIT-BIH, and they are excluded as paced.
+- 114 is a top OOF FP source in both the pre-fix and the beat-only runs (counts above).
+- Like the R-R bug, this is an input-correctness issue. It is not fixed here: one change per step.
