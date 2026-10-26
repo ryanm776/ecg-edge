@@ -90,6 +90,10 @@ def test_train_cv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     # The OOF pool is DS1 without 201, and the threshold is select_threshold on the pooled INT8 scores.
     oof = np.load(run / "oof_predictions.npz")
     assert set(oof["record_ids"]) == set(train.DS1_RECORDS) - {"201"}
+    # Saved symbols stay aligned with the labels and records (compare_oof.py derives AAMI classes from them).
+    for rec in set(oof["record_ids"]):
+        assert oof["symbols"][oof["record_ids"] == rec].tolist() == SYMBOLS.tolist()
+    np.testing.assert_array_equal(oof["y"], np.isin(oof["symbols"], ["V", "A"]))
     threshold = json.loads((run / "threshold.json").read_text())["threshold"]
     assert threshold == evaluate.select_threshold(oof["y"], oof["int8"])[0] == folds["threshold"]
 

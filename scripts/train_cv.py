@@ -159,7 +159,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     pooled_float, covered = cv.pool_oof(oof_float, held_out_masks)
     pooled_int8, _ = cv.pool_oof(oof_int8, held_out_masks)
-    y_oof, rec_oof = y_ev[covered], rec_ev[covered]
+    y_oof, rec_oof, sym_oof = y_ev[covered], rec_ev[covered], sym_ev[covered]
     pooled_float, pooled_int8 = pooled_float[covered], pooled_int8[covered]
 
     threshold, sweep = evaluate.select_threshold(
@@ -190,7 +190,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     test_float = evaluate.abnormal_score(model.predict([X_te_spec, X_te_rr]))
     test_int8 = evaluate.abnormal_score(evaluate.predict_tflite(tflite_path, X_te_spec, X_te_rr))
-    oof = SimpleNamespace(y=y_oof, record_ids=rec_oof, float=pooled_float, int8=pooled_int8,
+    oof = SimpleNamespace(y=y_oof, record_ids=rec_oof, symbols=sym_oof, float=pooled_float, int8=pooled_int8,
                           threshold=threshold, sweep=sweep, float_threshold=float_threshold, float_sweep=float_sweep)
     write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, test_float, test_int8,
                   tflite_bytes, tflite_path, evaluate)
@@ -253,7 +253,7 @@ def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, t
         oof.y, oof.record_ids, preds, threshold, float_threshold, evaluate,
     ).to_csv(os.path.join(out_dir, "oof_per_record_metrics.csv"), index=False)
     np.savez(os.path.join(out_dir, "oof_predictions.npz"), record_ids=oof.record_ids.astype(str), y=oof.y,
-             float=oof.float, int8=oof.int8)
+             symbols=oof.symbols.astype(str), float=oof.float, int8=oof.int8)
 
 
 def main():
