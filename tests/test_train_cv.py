@@ -117,6 +117,42 @@ def test_train_cv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     assert "Grouped CV over DS1" in (tmp_path / "cv_comparison.md").read_text(encoding="utf-8")
 
 
+def test_train_cv_caps_normal_beats_in_training_only(monkeypatch, tmp_path):
+    from ecg import data
+
+    calls = []
+
+    def capped_fake(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
+                    return_symbols=False, rr_from_all_annotations=False):
+        calls.append({"records": list(record_list), "cap": max_normal_per_record, "augment": augment})
+        X_spec, X_rr, y, record_ids, symbols = _fake_build_dataset(record_list, data_dir, augment=augment,
+                                                                   return_symbols=True)
+        keep = np.ones(len(y), dtype=bool)
+        if max_normal_per_record is not None:  # like extract_beats_from_record: the first `cap` N beats per record
+            for rec in set(record_ids):
+                normal = np.flatnonzero((record_ids == rec) & (y == 0))
+                keep[normal[max_normal_per_record:]] = False
+        out = (X_spec[keep], X_rr[keep], y[keep], record_ids[keep], symbols[keep])
+        return out if return_symbols else out[:4]
+
+    monkeypatch.setattr(data, "build_dataset", capped_fake)
+    base = ["--epochs", "1", "--seeds", "42", "--calib-samples", "10", "--artifacts-dir", str(tmp_path)]
+    assert _parse(monkeypatch, *base).max_normal_per_record_train == 600
+    monkeypatch.setattr(sys, "argv", ["train_cv", *base, "--max-normal-per-record-train", "2"])
+
+    train_cv.main()
+
+    train_calls = [c for c in calls if c["augment"]]
+    eval_calls = [c for c in calls if not c["augment"]]
+    assert [(c["records"], c["cap"]) for c in train_calls] == [(train.DS1_RECORDS, 2)]
+    assert sorted((tuple(c["records"]), c["cap"]) for c in eval_calls) == sorted(
+        [(tuple(train.DS1_RECORDS), None), (tuple(train.DS2_RECORDS), None)])
+    # Every OOF record keeps all 4 of its N beats, although training saw only 2 per record.
+    oof = np.load(tmp_path / "cv" / "bn_folded_seed42" / "oof_predictions.npz", allow_pickle=True)
+    for rec in set(oof["record_ids"]):
+        assert oof["symbols"][oof["record_ids"] == rec].tolist() == SYMBOLS.tolist()
+
+
 def _write_run(artifacts_dir, name, metrics):
     run = artifacts_dir / "cv" / name
     run.mkdir(parents=True)
