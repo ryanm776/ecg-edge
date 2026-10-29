@@ -528,7 +528,7 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - **Final-model calibration is deferred until after Stage 2.** Step 2a decides from OOF results only, so the final-model procedure ("Required before deployment" below) doesn't affect the decision.
 
 **Step 2b: balanced class weights.**
-- Multiclass with inverse-frequency class weights, compared with the better 2a multiclass run.
+- Multiclass with inverse-frequency class weights, compared with both 2a N/S/V runs. The full design, fixed before any 2b run, is in "Stage 2 step 2a results", "Step 2b design".
 - Once a multiclass model exists, +P for S and V is reported alongside Se.
 - **Normalize the weights** so that their mean, weighted by class frequency in the training data, is 1 (not implemented yet).
   - 2b compares weighted with unweighted losses. Raw inverse-frequency weights would change the data loss's overall scale, and with it the balance against L2.
@@ -723,3 +723,139 @@ No float row exceeds the spread either.
 - **The deployment requirement still stands.** One set of three seeds without a collapse doesn't show that the final-model procedure is reliable.
   - Final epochs were 13 / 15 / 26.
   - Fold best epochs now go as low as 1 (seed 43, fold 0: `[1, 22, 24, 15, 11]`).
+
+## Stage 2 step 2a results: binary vs. N/S/V
+
+Binary and N/S/V multiclass models were trained under two weightings, with focal gamma 2 throughout (`train_cv.py --seeds 42 43 44`). Everything else matches step 1b: beat-only R-R, MLII by name, bn_folded.
+
+| Weighting | Binary | N/S/V |
+|---|---|---|
+| unweighted | `--loss-weights none`, in `stage2/step2a_binary_unweighted` | `--classes nsv --loss-weights none`, in `stage2/step2a_nsv_unweighted` |
+| matched | alpha 0.25: the step 1b runs, `stage2/step1b_mlii` | N 0.75 / S 0.25 / V 0.25: `--classes nsv`, in `stage2/step2a_nsv_matched` |
+
+- The binary-matched cell reuses step 1b. A test pins the binary model's seed-42 initial weights to the pre-2a builder's.
+- The OOF pool is the same 48,596 beats: 44,191 N, 815 S, 3,590 V. 201 is never held out.
+- The multiclass model covers N, S and V only. F and Q beats are dropped, as in the binary runs.
+
+**Decision metrics: pooled OOF, INT8, per class vs. N.** Values are seeds 42 / 43 / 44, then mean ± std. "Exceeds" means |gain| > the larger seed std. "Separated" means every candidate seed is on the gain's side of every reference seed. Tables: `stage2/step2a_unweighted/oof_comparison.md` (reference binary_unweighted) and `stage2/step2a_matched/oof_comparison.md` (reference step 1b).
+
+Unweighted row:
+
+| Metric | Binary | N/S/V | Gain | Exceeds / separated |
+|---|---|---|---|---|
+| S ROC-AUC | 0.821 / 0.869 / 0.772 = 0.821 ± 0.049 | 0.857 / 0.832 / 0.782 = 0.824 ± 0.038 | +0.003 | no / no |
+| S PR-AUC | 0.201 / 0.242 / 0.196 = 0.213 ± 0.025 | 0.213 / 0.104 / 0.115 = 0.144 ± 0.060 | −0.069 | yes / no: N/S/V seed 42 (0.213) beats binary seeds 42 and 44 |
+| V ROC-AUC | 0.968 / 0.987 / 0.982 = 0.979 ± 0.010 | 0.969 / 0.971 / 0.968 = 0.969 ± 0.001 | −0.010 | yes, by under 0.001 / no |
+| V PR-AUC | 0.895 / 0.936 / 0.932 = 0.921 ± 0.022 | 0.880 / 0.884 / 0.886 = 0.883 ± 0.003 | −0.038 | yes / yes: the highest N/S/V seed (0.886) is below the lowest binary seed (0.895) |
+
+Matched row:
+
+| Metric | Binary (step 1b) | N/S/V | Gain | Exceeds / separated |
+|---|---|---|---|---|
+| S ROC-AUC | 0.772 / 0.842 / 0.788 = 0.801 ± 0.037 | 0.874 / 0.828 / 0.883 = 0.862 ± 0.030 | +0.061 | yes / no: N/S/V seed 43 (0.828) is below step 1b seed 43 (0.842) |
+| S PR-AUC | 0.096 / 0.151 / 0.232 = 0.160 ± 0.068 | 0.117 / 0.087 / 0.168 = 0.124 ± 0.041 | −0.036 | no / no |
+| V ROC-AUC | 0.975 / 0.972 / 0.984 = 0.977 ± 0.006 | 0.973 / 0.976 / 0.982 = 0.977 ± 0.005 | −0.001 | no / no |
+| V PR-AUC | 0.889 / 0.914 / 0.939 = 0.914 ± 0.025 | 0.904 / 0.899 / 0.934 = 0.912 ± 0.019 | −0.002 | no / no |
+
+The float rows give the same verdicts. INT8 − float: the largest per-seed gap of any decision metric is 0.021 (binary unweighted, S PR-AUC). For both N/S/V runs it is at most 0.007, so the N/S/V head has no quantization gap.
+
+- **Reading under the plan's rule:**
+  - Unweighted: N/S/V is worse. The V PR-AUC loss is separated; the S PR-AUC loss exceeds the spread but isn't separated.
+  - Matched: N/S/V shows no loss. Three metrics are within the spread. S ROC-AUC gains beyond the spread but isn't separated.
+  - N/S/V doesn't win under both weightings, so it has no structural benefit. The two rows disagree, so class structure and weighting interact.
+- **Decision: nsv_matched carries forward.** It is the reference for step 2b, and the default if 2b produces no winner. The grounds don't depend on the 2a numbers:
+  - AAMI comparability. An N/S/V model gives per-class Se and +P, as reported in de Chazal-split papers; for a binary model, +P per class is undefined.
+  - Only N/S/V lets the loss weight S separately from V, and S is the open gap.
+  - The matched row is read as no loss against binary, not as a win.
+
+**Descriptive (never decisive):**
+- **For S, the class's own probability ranks worse than the abnormal score.** S vs. N ROC-AUC on P(S) is 0.752 ± 0.074 (unweighted) and 0.805 ± 0.074 (matched), against 0.824 and 0.862 on the abnormal score. For V, P(V) and the abnormal score agree (0.969–0.979).
+- **S ↔ V mix-ups at the selected threshold:**
+  - nsv_unweighted: S called V 193 / 109 / 31, V called S 88 / 75 / 153.
+  - nsv_matched: S called V 44 / 13 / 101, V called S 258 / 211 / 374.
+- **Per-record S ranking (OOF INT8 ROC-AUC, seeds 42 / 43 / 44):**
+  - 209: nsv_matched 0.975 / 0.931 / 0.917 against step 1b's 0.809 / 0.814 / 0.708. Every N/S/V seed is above every step 1b seed.
+  - 118: nsv_matched 0.384 / 0.898 / 0.984 (step 1b: 0.989 / 0.928 / 0.999); nsv_unweighted 0.956 / 0.905 / 0.564.
+  - 207, 220 and 223 stay at 0.886–0.997 in every cell; 124 stays near chance (0.359–0.754).
+- **At the selected threshold** (pooled-OOF INT8, F1-maximizing):
+  - Thresholds: binary unweighted 0.65 / 0.60 / 0.50, nsv_unweighted 0.70 / 0.60 / 0.70, step 1b 0.45 for every seed, nsv_matched 0.65 / 0.60 / 0.50.
+  - S recall (flagged abnormal): binary unweighted 0.307 ± 0.083, nsv_unweighted 0.273 ± 0.143, step 1b 0.240 ± 0.128, nsv_matched 0.188 ± 0.105.
+  - FP rate on N beats: 0.010–0.013 in every cell.
+
+**Operating points at fixed target recall** (pooled OOF, INT8, mean ± std over seeds; `oof_comparison.md`, "Operating points"). The target recall is abnormal recall (S and V beats with abnormal_score > threshold), and each threshold is the highest that reaches it. "Flagged" Se counts a beat flagged abnormal. The "call" columns (N/S/V only) use the call rule, so an S beat called V is an S miss and counts against +P_V.
+
+| Cell | Target recall | Precision | FP | Se_S flagged | Se_V flagged | Se_S call | Se_V call | +P_S call | +P_V call |
+|---|---|---|---|---|---|---|---|---|---|
+| binary unweighted | 0.90 | 0.370 ± 0.111 | 7,540 ± 4,008 | 0.630 ± 0.039 | 0.963 ± 0.008 | — | — | — | — |
+| nsv_unweighted | 0.90 | 0.384 ± 0.014 | 6,368 ± 383 | 0.678 ± 0.030 | 0.951 ± 0.007 | 0.426 ± 0.036 | 0.892 ± 0.015 | 0.210 ± 0.155 | 0.399 ± 0.049 |
+| step 1b | 0.90 | 0.358 ± 0.077 | 7,448 ± 2,195 | 0.653 ± 0.080 | 0.958 ± 0.018 | — | — | — | — |
+| nsv_matched | 0.90 | 0.468 ± 0.137 | 5,020 ± 2,693 | 0.665 ± 0.044 | 0.955 ± 0.010 | 0.463 ± 0.043 | 0.844 ± 0.006 | 0.141 ± 0.097 | 0.592 ± 0.029 |
+| binary unweighted | 0.95 | 0.211 ± 0.077 | 17,417 ± 7,234 | 0.813 ± 0.041 | 0.984 ± 0.009 | — | — | — | — |
+| nsv_unweighted | 0.95 | 0.191 ± 0.034 | 18,264 ± 4,433 | 0.853 ± 0.023 | 0.973 ± 0.005 | 0.593 ± 0.042 | 0.905 ± 0.017 | 0.048 ± 0.019 | 0.291 ± 0.033 |
+| step 1b | 0.95 | 0.203 ± 0.046 | 17,123 ± 4,316 | 0.821 ± 0.052 | 0.981 ± 0.013 | — | — | — | — |
+| nsv_matched | 0.95 | 0.270 ± 0.050 | 11,718 ± 3,295 | 0.853 ± 0.023 | 0.974 ± 0.005 | 0.640 ± 0.034 | 0.855 ± 0.003 | 0.067 ± 0.023 | 0.419 ± 0.024 |
+
+- **FN side, at target recall 0.90:**
+  - S recall is 0.63–0.68 flagged, so 32–37% of S beats are missed. Under the call rule it is 0.43–0.46, since some flagged S beats are called V.
+  - V is 0.95–0.96 flagged. Under the call rule it drops to 0.84–0.89, since V beats called S count as V misses.
+  - So S recall at the F1 threshold (0.19–0.31, above) understates what the models can reach, but reaching it costs precision.
+- **FP side, at target recall 0.90:**
+  - 5,020–7,540 N false positives, 11.4–17.1% of the 44,191 N beats, for abnormal precision 0.36–0.47.
+  - +P_S is 0.14–0.21: most beats called S aren't S.
+  - At target recall 0.95, FPs rise to 11,718–18,264 (26.5–41.3% of N) and +P_S falls to 0.05–0.07.
+- **S is the gap on both sides,** recall and precision.
+- nsv_matched has the fewest FPs and the highest precision at both target recalls, but its seed spread at 0.90 is wide (FP 2,561–7,898 by seed).
+
+**DS2, final models (INT8, at each seed's pooled-OOF threshold; reported, never used for a choice):**
+
+| Cell | PR-AUC | F1 | FP | FN | Se_S | +P_S | Se_V | +P_V |
+|---|---|---|---|---|---|---|---|---|
+| binary unweighted | 0.793 ± 0.060 | 0.678 ± 0.066 | 1,930 ± 1,327 | 1,416 ± 1,058 | 0.466 ± 0.391 | — | 0.865 ± 0.139 | — |
+| nsv_unweighted | 0.789 ± 0.083 | 0.698 ± 0.097 | 1,962 ± 1,280 | 1,341 ± 388 | 0.225 ± 0.178 | 0.354 ± 0.137 | 0.887 ± 0.076 | 0.653 ± 0.161 |
+| step 1b | 0.817 ± 0.007 | 0.754 ± 0.023 | 758 ± 283 | 1,536 ± 133 | 0.326 ± 0.040 | — | 0.908 ± 0.027 | — |
+| nsv_matched | 0.752 ± 0.036 | 0.646 ± 0.053 | 2,022 ± 1,768 | 1,733 ± 478 | 0.108 ± 0.099 | 0.329 ± 0.053 | 0.888 ± 0.092 | 0.656 ± 0.208 |
+
+- **nsv_matched calls 223 ± 7 of DS2's 1,836 S beats V.** Its DS2 S sensitivity is 0.108 ± 0.099.
+- Every cell's DS2 numbers carry the unresolved final-model procedure (epoch count and threshold transfer; see "Required before deployment"). Final epochs in the three new 2a runs range from 9 to 28.
+
+### Step 2b design
+
+Fixed before any 2b run.
+
+- **Cells:** a three-way comparison within N/S/V.
+  - nsv_unweighted (from 2a)
+  - nsv_matched, N 0.75 / S 0.25 / V 0.25 (from 2a)
+  - nsv_balanced (new, seeds 42, 43, 44)
+- **Balanced weights:**
+  - Inverse class frequency in each fold's training view: after the 600-per-record normal cap, before augmentation (which duplicates every beat once and leaves the frequencies unchanged).
+  - Normalized so the frequency-weighted mean weight is 1, i.e. w_c = 1 / (3 f_c). The final model uses the same rule on all of DS1.
+  - Each run records its weights in `metrics.json`.
+- **Decision:**
+  - Primary metric: pooled-OOF INT8 S PR-AUC.
+  - A cell wins only if its mean beats each other cell's by more than the larger of the two runs' seed std.
+  - Guard: the winner's V PR-AUC must not fall below nsv_matched's by more than the larger seed std.
+  - Step 1b is reported as a reference row, not a gate.
+  - If no cell clears the rule, nsv_matched carries forward, and the result is read as evidence that loss weighting isn't the main lever for S.
+  - No seeds are added after seeing the 2b results.
+- **Loss scale:** the cells don't have the same data-loss scale against the fixed L2 penalty. Frequency-weighted mean weight:
+  - unweighted and balanced: 1
+  - matched: 0.627 / 0.618 / 0.615 / 0.620 / 0.608 in folds 0–4, and 0.618 on all of DS1
+
+  So comparing balanced with matched changes two things at once: class balance, and loss scale (with it the relative L2 strength).
+- **Pre-declared follow-up, only if nsv_balanced wins:**
+  - Train nsv_matched_normalized: the 0.75 / 0.25 / 0.25 ratios rescaled to a frequency-weighted mean of 1, seeds 42, 43, 44.
+  - Compare it with nsv_balanced under the same rule, to tell whether the gain came from class balance or from scale.
+  - If nsv_balanced doesn't win, the follow-up is skipped.
+
+Class counts in each training view (capped, before augmentation) and the balanced weights they give:
+
+| Training view | N / S / V | Frequency | Balanced weights N / S / V |
+|---|---|---|---|
+| fold 0 (209, 203, 215 held out) | 11,400 / 555 / 3,179 | 0.753 / 0.037 / 0.210 | 0.443 / 9.089 / 1.587 |
+| fold 1 | 10,800 / 835 / 3,058 | 0.735 / 0.057 / 0.208 | 0.453 / 5.865 / 1.602 |
+| fold 2 | 10,800 / 843 / 3,148 | 0.730 / 0.057 / 0.213 | 0.457 / 5.849 / 1.566 |
+| fold 3 | 10,200 / 835 / 2,752 | 0.740 / 0.061 / 0.200 | 0.451 / 5.504 / 1.670 |
+| fold 4 | 10,200 / 832 / 3,213 | 0.716 / 0.058 / 0.226 | 0.466 / 5.707 / 1.478 |
+| all DS1 (final model) | 13,200 / 943 / 3,788 | 0.736 / 0.053 / 0.211 | 0.453 / 6.338 / 1.578 |
+
+Fold 0 holds out 209, 203 and 215, which carry 388 of the 943 S beats in this view, most of them from 209. So fold 0's S weight is the largest (9.1).
