@@ -557,6 +557,15 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - calibration sweep
 - fair QAT
 - more training data from other PhysioNet databases (below)
+- the training normal-beat cap: cap vs. no cap, and random vs. first-N sampling under the cap (below)
+
+**Parked idea: how the training cap samples normal beats.** Not changed in Stage 2.
+- **Current behavior:** training keeps the first 600 N beats of each DS1 record in annotation order (`--max-normal-per-record-train`, `extract_beats_from_record`). Evaluation (OOF, DS2, val) is uncapped.
+- **Every DS1 record hits the cap.** Each has 1,507–3,195 N-class annotations (`SYMBOL_MAP` class 0, before the window and R-R-neighbor rules), so the cap keeps about 19–40% of them. The 600th falls between minute 5.6 (215) and minute 12.5 (124) of the 30-minute recording, with a median of 8.2. So training normals come only from the start of each record.
+- **Two questions, parked together:**
+  - cap vs. no cap
+  - under the cap, random vs. first-N sampling
+- **What this affects:** training representativeness only. The evaluation numbers already cover every beat, so they're unaffected.
 
 **Parked idea: add training data from other PhysioNet databases.** Not implemented.
 - **Why:** DS1 has only 22 patients, so no single validation group is representative, and fold models vary a lot with the patients they train on.
