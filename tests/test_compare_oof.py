@@ -135,6 +135,58 @@ def test_oof_metrics_class_probability_columns_for_nsv_runs():
     assert all(np.isnan(binary[k]) for k in compare_oof.CLASS_PROB_METRICS)
 
 
+def _nsv_oof(rng, n=600):
+    aami = rng.choice(np.array(["N", "S", "V"]), n, p=[0.8, 0.1, 0.1])
+    probs = rng.dirichlet([1, 1, 1], size=n)
+    probs[aami == "S", 1] += 0.5
+    probs[aami == "V", 2] += 0.5
+    probs /= probs.sum(axis=1, keepdims=True)
+    probs = np.round(probs * 256) / 256  # INT8-like ties
+    return aami, probs
+
+
+@pytest.mark.parametrize("target", compare_oof.TARGET_RECALLS)
+def test_operating_point_is_the_highest_threshold_reaching_the_target(target):
+    aami, probs = _nsv_oof(np.random.default_rng(4))
+    scores = 1 - probs[:, 0]
+    abnormal = aami != "N"
+
+    op = compare_oof.operating_point(aami, scores, target)
+
+    flagged = scores > op["threshold"]
+    tp, fp = int((flagged & abnormal).sum()), int((flagged & ~abnormal).sum())
+    assert (op["TP"], op["FP"]) == (tp, fp)
+    assert op["abnormal_recall"] == tp / abnormal.sum() >= target
+    assert op["precision"] == tp / (tp + fp)
+    assert op["Se_S_flagged"] == flagged[aami == "S"].mean() and op["Se_V_flagged"] == flagged[aami == "V"].mean()
+    # S and V flagged counts add up to TP.
+    assert op["Se_S_flagged"] * (aami == "S").sum() + op["Se_V_flagged"] * (aami == "V").sum() == pytest.approx(tp)
+    # The next abnormal score up misses the target, so no higher threshold reaches it.
+    higher = scores[abnormal][scores[abnormal] > op["threshold"]].min()
+    assert ((scores > higher) & abnormal).sum() / abnormal.sum() < target
+    assert all(np.isnan(op[k]) for k in compare_oof.CALL_RULE_METRICS)
+
+
+def test_operating_point_call_rule_metrics_for_nsv_runs():
+    from ecg.evaluate import predicted_classes
+
+    aami, probs = _nsv_oof(np.random.default_rng(5))
+    scores = 1 - probs[:, 0]
+
+    op = compare_oof.operating_point(aami, scores, 0.90, probs)
+
+    pred = predicted_classes(probs, op["threshold"])
+    for cls in ("S", "V"):
+        hit = ((aami == cls) & (pred == cls)).sum()
+        assert op[f"Se_{cls}_call"] == hit / (aami == cls).sum() <= op[f"Se_{cls}_flagged"]
+        assert op[f"pP_{cls}_call"] == hit / (pred == cls).sum()
+    # The call rule splits exactly the flagged beats into S and V calls.
+    assert (pred != "N").sum() == op["TP"] + op["FP"]
+    binary = compare_oof.operating_point(aami, scores, 0.90)
+    assert {k: binary[k] for k in binary if k not in compare_oof.CALL_RULE_METRICS} == {
+        k: op[k] for k in binary if k not in compare_oof.CALL_RULE_METRICS}
+
+
 def test_int8_float_gap_is_the_per_seed_difference():
     rows = []
     for run, gaps in (("a", [0.01, -0.02, 0.03]), ("b", [0.0, 0.0, 0.0])):
@@ -171,3 +223,14 @@ def test_main_reports_class_probability_columns_only_for_nsv_runs(monkeypatch, t
     assert nsv[compare_oof.CLASS_PROB_METRICS].notna().all().all()
     assert binary[compare_oof.CLASS_PROB_METRICS].isna().all().all()
     assert "INT8 minus float" in (out / "oof_comparison.md").read_text(encoding="utf-8")
+
+    ops = pd.read_csv(out / "oof_comparison_operating_points.csv")
+    assert len(ops) == 2 * 2 * 2 * len(compare_oof.TARGET_RECALLS)  # runs x seeds x models x target recalls
+    assert ops[ops["run"] == "nsv"][compare_oof.CALL_RULE_METRICS].notna().all().all()
+    assert ops[ops["run"] == "binary"][compare_oof.CALL_RULE_METRICS].isna().all().all()
+    z = np.load(tmp_path / "nsv" / "bn_folded_seed43" / "oof_predictions.npz")
+    row = ops[(ops["run"] == "nsv") & (ops["seed"] == 43) & (ops["model"] == "int8")
+              & (ops["target_recall"] == 0.90)].iloc[0]
+    expected = compare_oof.operating_point(compare_oof.aami_class(z["symbols"]), z["int8"], 0.90, z["int8_probs"])
+    assert row[list(expected)].to_dict() == pytest.approx(expected)
+    assert "Operating points at fixed abnormal recall" in (out / "oof_comparison.md").read_text(encoding="utf-8")
