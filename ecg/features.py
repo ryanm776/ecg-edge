@@ -137,7 +137,11 @@ def compute_spectrogram(window, fs, nperseg=64, noverlap=48):
     return sxx_log
 
 
-def compute_rr_timing_features(rr_intervals, i, lookback=10):
+# Intervals averaged into local_mean_rr (Stage 2 step 3a compares 30; diagnosis.md, "Step 3 design").
+RR_LOOKBACK = 10
+
+
+def compute_rr_timing_features(rr_intervals, i, lookback=RR_LOOKBACK):
     pre_rr = rr_intervals[i - 1]
     post_rr = rr_intervals[i]
     start_k = max(0, i - lookback)
@@ -186,6 +190,7 @@ def extract_beats_from_record(
     window_size=WINDOW_SIZE,
     rng=None,
     rr_from_all_annotations=False,
+    rr_lookback=RR_LOOKBACK,
 ):
     """Extract (spectrogram, R-R features, label) triples for every usable beat in a record.
 
@@ -197,6 +202,8 @@ def extract_beats_from_record(
 
     `max_normal=None` means no cap on normal beats. `augment=True` adds an R-peak-jitter
     duplicate of each beat (simulating R-peak detection error) in addition to the original.
+    `rr_lookback` is the number of intervals `local_mean_rr` averages (fewer near the record's start);
+    it changes only `local_mean_rr` and `rr_ratio`, never which beats are extracted.
     Also returns each beat's original annotation symbol (e.g. to split recall by V vs. S).
     """
     half_window = window_size // 2
@@ -238,7 +245,7 @@ def extract_beats_from_record(
 
             window = filtered_signal[adj_idx - half_window: adj_idx + half_window]
             norm_spec = compute_spectrogram(window, fs)
-            rr_features = compute_rr_timing_features(rr_intervals, j)
+            rr_features = compute_rr_timing_features(rr_intervals, j, lookback=rr_lookback)
 
             spec_list.append(norm_spec)
             rr_list.append(rr_features)

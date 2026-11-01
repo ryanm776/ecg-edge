@@ -6,6 +6,7 @@ import pytest
 from ecg.features import (
     BEAT_SYMBOLS,
     NSV_CLASSES,
+    RR_LOOKBACK,
     SYMBOL_MAP,
     aami_class,
     aami_class_metrics,
@@ -278,3 +279,52 @@ def test_extract_beats_rr_from_all_annotations_reproduces_the_pre_fix_features()
     assert syms == [symbols[i] for i in kept_i]
     assert X_rr == [compute_rr_timing_features(rr_all, i) for i in kept_i]
     assert X_rr[3][0] == 100 / fs  # 1100's pre_rr ends at the "+" annotation
+
+
+def _record_with_a_premature_run():
+    """60 beats 300 samples apart, with a run of 12 premature A beats (200 apart) in the middle, so a
+    10-interval and a 30-interval window see different histories."""
+    fs = 360
+    gaps = [300] * 25 + [200] * 12 + [300] * 22
+    samples = np.concatenate([[200], 200 + np.cumsum(gaps)])
+    symbols = ["N"] * 26 + ["A"] * 12 + ["N"] * 22
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(samples[-1] + 400) / fs)
+    return signal, fs, samples, symbols
+
+
+def test_rr_lookback_changes_only_local_mean_and_ratio():
+    signal, fs, samples, symbols = _record_with_a_premature_run()
+    rr = np.diff(samples) / fs
+
+    def extract(**kw):
+        spec, X_rr, y, rec, syms = extract_beats_from_record(signal, fs, samples, symbols, "r", augment=True,
+                                                             rng=np.random.default_rng(0), **kw)
+        return np.array(spec), np.array(X_rr), y, rec, syms
+
+    default, ten, thirty = extract(), extract(rr_lookback=10), extract(rr_lookback=30)
+    assert RR_LOOKBACK == 10
+    for a, b in zip(default, ten):
+        np.testing.assert_array_equal(a, b)
+    # Same beats, labels, symbols and spectrograms whatever the lookback.
+    np.testing.assert_array_equal(thirty[0], ten[0])
+    assert thirty[2:] == ten[2:]
+    # pre_rr, post_rr and pre_post_ratio are unchanged; local_mean_rr and rr_ratio follow the 30-interval window.
+    np.testing.assert_array_equal(thirty[1][:, [0, 1, 4]], ten[1][:, [0, 1, 4]])
+    beat_j = np.repeat(np.arange(1, len(samples) - 1), 2)  # every beat is extracted, each with its jitter duplicate
+    np.testing.assert_array_equal(thirty[1], [compute_rr_timing_features(rr, j, lookback=30) for j in beat_j])
+    np.testing.assert_allclose(thirty[1][:, 3], thirty[1][:, 0] / thirty[1][:, 2])
+    # Late in the run the 10-interval window is all premature intervals, the 30-interval one isn't.
+    last_a = 2 * (37 - 1)  # row of the last A beat (beat index 37)
+    assert symbols[37] == "A" and ten[1][last_a, 3] == pytest.approx(1.0)
+    assert thirty[1][last_a, 3] < 0.85
+
+
+def test_rr_lookback_window_is_truncated_at_the_record_start():
+    signal, fs, samples, symbols = _record_with_a_premature_run()
+    rr = np.diff(samples) / fs
+
+    _, X_rr, *_ = extract_beats_from_record(signal, fs, samples, symbols, "r", rr_lookback=30)
+
+    # Beat j averages the j intervals before it while j < 30.
+    for j in (1, 5, 29, 30, 31):
+        assert X_rr[j - 1][2] == pytest.approx(np.mean(rr[max(0, j - 30):j]))

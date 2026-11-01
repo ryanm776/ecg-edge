@@ -45,7 +45,8 @@ def lead_index(sig_names, lead=LEAD):
 
 
 def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
-                  return_symbols=False, rr_from_all_annotations=False, lead=LEAD):
+                  return_symbols=False, rr_from_all_annotations=False, lead=LEAD,
+                  rr_lookback=features.RR_LOOKBACK):
     """Load, filter, and feature-extract every usable beat across `record_list`.
 
     Returns (X_spec, X_rr, y, record_ids) as arrays, all aligned beat-for-beat.
@@ -54,6 +55,7 @@ def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=Fal
     `rr_from_all_annotations=True` reproduces the pre-fix R-R features (see extract_beats_from_record).
     `lead` picks the channel by signal name; `lead=None` reproduces the pre-fix behavior of always reading
     channel 0, which for record 114 is V5 instead of MLII.
+    `rr_lookback`: intervals averaged into `local_mean_rr` (see extract_beats_from_record).
     """
     ensure_mitdb_cached(data_dir, record_list)
     rng = np.random.default_rng(seed)
@@ -80,6 +82,7 @@ def build_dataset(record_list, data_dir, max_normal_per_record=None, augment=Fal
             augment=augment,
             rng=rng,
             rr_from_all_annotations=rr_from_all_annotations,
+            rr_lookback=rr_lookback,
         )
         spec_list.extend(specs)
         rr_list.extend(rrs)

@@ -70,3 +70,17 @@ def test_build_dataset_lead_none_reads_channel_0(monkeypatch):
 
     for a, b in zip(legacy, v5):
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("kwargs, expected", [({}, 10), ({"rr_lookback": 30}, 30)])
+def test_build_dataset_passes_rr_lookback_to_extraction(monkeypatch, kwargs, expected):
+    from ecg import features
+
+    seen = []
+    real = features.extract_beats_from_record
+    monkeypatch.setattr(features, "extract_beats_from_record",
+                        lambda *a, **kw: seen.append(kw["rr_lookback"]) or real(*a, **kw))
+
+    _build(monkeypatch, ["MLII", "V5"], **kwargs)
+
+    assert seen == [expected] and features.RR_LOOKBACK == 10
