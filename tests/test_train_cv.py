@@ -38,7 +38,7 @@ def test_train_cv_args(monkeypatch, tmp_path):
     assert args.variant == "bn_folded" and args.seeds == [42]
     # The defaults are the step 1b configuration.
     assert train_cv.run_config(args) == train_cv.DEFAULT_CONFIG == {"classes": "binary", "loss_weights": "matched",
-                                                                    "rr_lookback": 10}
+                                                                    "rr_lookback": 10, "normalize_rr": False}
     assert Path(args.artifacts_dir) == Path("artifacts") / "dechazal"
     for argv in (["--variant", "baseline"], ["--seeds", "42", "42"], ["--rr-lookback", "0"]):
         with pytest.raises(SystemExit):
@@ -111,6 +111,9 @@ def test_train_cv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     metrics = json.loads((run / "metrics.json").read_text())
     assert (metrics["classes"], metrics["loss_weights"]) == ("binary", "matched")
     assert metrics["loss"]["weights"] == 0.25
+    # Without --normalize-rr no model records statistics.
+    assert metrics["rr_norm"] is None and [f["rr_norm"] for f in folds["folds"]] == [None] * len(train.CV_FOLDS)
+    assert not (run / "rr_norm.json").exists()
     assert "int8_probs" not in np.load(run / "oof_predictions.npz").files
 
     summary = pd.read_csv(tmp_path / "cv_comparison_seeds.csv")
@@ -208,12 +211,15 @@ def test_train_cv_refuses_to_mix_configurations_in_one_dir(monkeypatch, tmp_path
     _write_run(nsv_dir, "bn_folded_seed42", {"classes": "nsv", "loss_weights": "none"})
     args = _parse(monkeypatch, "--artifacts-dir", str(nsv_dir), "--seeds", "43", "--classes", "nsv",
                   "--loss-weights", "none")
-    assert train_cv.run_config(args) == {"classes": "nsv", "loss_weights": "none", "rr_lookback": 10}
+    assert train_cv.run_config(args) == {"classes": "nsv", "loss_weights": "none", "rr_lookback": 10,
+                                         "normalize_rr": False}
     with pytest.raises(SystemExit):
         _parse(monkeypatch, "--artifacts-dir", str(nsv_dir), "--seeds", "43", "--classes", "nsv")
     # Runs written before --rr-lookback existed read as the default lookback, 10.
     with pytest.raises(SystemExit):
         _parse(monkeypatch, *base, "--rr-lookback", "30")
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, *base, "--normalize-rr")
     assert _parse(monkeypatch, *base, "--rr-lookback", "10").rr_lookback == 10
 
 
@@ -325,3 +331,51 @@ def test_train_cv_rr_lookback_reaches_every_view_and_is_recorded(monkeypatch, tm
     # The directory now holds a lookback-30 configuration; the default lookback can't be added to it.
     with pytest.raises(SystemExit):
         _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--seeds", "43", "--classes", "nsv")
+
+
+def test_train_cv_normalize_rr_fits_each_model_on_its_own_training_view(monkeypatch, tmp_path):
+    from ecg import cv, data, evaluate
+    from ecg.features import apply_rr_normalizer, fit_rr_normalizer
+
+    monkeypatch.setattr(data, "build_dataset", _fake_build_dataset)
+    monkeypatch.setattr(sys, "argv", ["train_cv", "--epochs", "1", "--seeds", "42", "--calib-samples", "10",
+                                      "--artifacts-dir", str(tmp_path), "--classes", "nsv", "--normalize-rr"])
+
+    train_cv.main()
+
+    run = tmp_path / "cv" / "bn_folded_seed42"
+    folds = json.loads((run / "folds.json").read_text())
+    metrics = json.loads((run / "metrics.json").read_text())
+    assert metrics["normalize_rr"] is True
+    X_spec_ev, X_rr_ev, _, rec_ev, _ = _fake_build_dataset(train.DS1_RECORDS, "data", return_symbols=True)
+    _, X_rr_tr, _, rec_tr, _ = _fake_build_dataset(train.DS1_RECORDS, "data", augment=True, return_symbols=True)
+    X_spec_te, X_rr_te, y_te, _, _ = _fake_build_dataset(train.DS2_RECORDS, "data", return_symbols=True)
+
+    # Each fold's statistics are those of its own training view (DS1 minus the held-out fold, augmented),
+    # so they don't depend on the held-out beats; the final model's are those of all DS1.
+    stats = []
+    for f, (tr, _) in zip(folds["folds"], cv.fold_masks(rec_tr, train.CV_FOLDS)):
+        mean, std = fit_rr_normalizer(X_rr_tr[tr])
+        np.testing.assert_allclose(f["rr_norm"]["mean"], mean)
+        np.testing.assert_allclose(f["rr_norm"]["std"], std)
+        stats.append((mean, std))
+    final_mean, final_std = fit_rr_normalizer(X_rr_tr)
+    np.testing.assert_allclose(metrics["rr_norm"]["mean"], final_mean)
+    np.testing.assert_allclose(metrics["rr_norm"]["std"], final_std)
+    assert json.loads((run / "rr_norm.json").read_text()) == metrics["rr_norm"]
+
+    # Every fold model's OOF scores come from held-out inputs normalized with that fold's statistics.
+    oof = np.load(run / "oof_predictions.npz")
+    covered = rec_ev != "201"
+    for k, (_, ho) in enumerate(cv.fold_masks(rec_ev, train.CV_FOLDS)):
+        expected = evaluate.predict_tflite(run / "folds" / f"fold{k}_int8.tflite", X_spec_ev[ho],
+                                           apply_rr_normalizer(X_rr_ev[ho], *stats[k]))
+        np.testing.assert_array_equal(oof["int8_probs"][ho[covered]], expected)
+
+    # The final model's DS2 row is computed on DS2 inputs normalized with the final statistics.
+    probs = evaluate.predict_tflite(run / "model_int8.tflite", X_spec_te,
+                                    apply_rr_normalizer(X_rr_te, final_mean, final_std))
+    int8_row = pd.read_csv(run / "comparison_rows.csv").iloc[2]
+    assert int8_row["model"] == "int8" and int8_row["variant"] == "bn_folded+nsv+rr_norm"
+    assert np.isclose(int8_row["pr_auc"], evaluate.ranking_metrics(y_te, evaluate.abnormal_score(probs))["pr_auc"],
+                      rtol=1e-12)

@@ -15,7 +15,10 @@ All thresholds run on evaluate.abnormal_score (P(abnormal) for binary output, 1 
 focal loss's class weighting (Stage 2 step 2a). `--loss-weights balanced` (N/S/V only, step 2b) weights each class
 by inverse frequency in the model's own training view, normalized to a frequency-weighted mean of 1, and early-stops
 on the unweighted validation loss, the criterion of `--loss-weights none`. `--rr-lookback` sets how many R-R intervals
-`local_mean_rr` averages, for every view (training, OOF, DS2; Stage 2 step 3a). One artifacts dir holds one configuration.
+`local_mean_rr` averages, for every view (training, OOF, DS2; Stage 2 step 3a). `--normalize-rr` (step 3b) standardizes
+the R-R features with mean/std fitted on each model's own training view (a fold model's: DS1 minus its held-out fold;
+the final model's: all DS1), applied to that model's training, held-out, DS2 and calibration inputs; never fitted on
+held-out or DS2 beats. One artifacts dir holds one configuration.
 Writes <artifacts-dir>/cv/<variant>_seed<S>/ per seed and <artifacts-dir>/cv_comparison.{csv,md} plus
 cv_comparison_seeds.csv over all runs found there. In the tables, `int8_val`/`float_val` and `val_f1` refer
 to the pooled out-of-fold predictions, which play the role of validation.
@@ -40,7 +43,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import compare_variants  # noqa: E402  (pandas only)
 import train  # noqa: E402  (numpy/pandas only)
 from ecg.features import (  # noqa: E402
-    NSV_CLASSES, RR_LOOKBACK, balanced_class_weights, loss_scale, nsv_labels, type_recall,
+    NSV_CLASSES, RR_LOOKBACK, apply_rr_normalizer, balanced_class_weights, fit_rr_normalizer, loss_scale, nsv_labels,
+    type_recall,
 )
 
 VARIANTS = ["bn_folded"]
@@ -58,8 +62,8 @@ LOSS_WEIGHTS = {
 # Step 2b: a balanced fold model early-stops on the unweighted val loss (plus L2), as `none` does, not on its
 # S-heavy weighted val loss over the patients it is then scored on (diagnosis.md, "Step 2b design").
 UNWEIGHTED_MONITOR = {"balanced"}
-# The configuration of runs written before --classes / --loss-weights / --rr-lookback existed.
-DEFAULT_CONFIG = {"classes": "binary", "loss_weights": "matched", "rr_lookback": RR_LOOKBACK}
+# The configuration of runs written before --classes / --loss-weights / --rr-lookback / --normalize-rr existed.
+DEFAULT_CONFIG = {"classes": "binary", "loss_weights": "matched", "rr_lookback": RR_LOOKBACK, "normalize_rr": False}
 CV_COLUMNS = [
     "run", "variant", "calib_samples", "seed", "final_epochs", "model", "threshold_from", "threshold", "val_f1",
     "test_precision", "test_recall", "test_f1", "tp", "fp", "fn", "se_V", "pp_V", "se_S", "pp_S", "S_as_V", "V_as_S",
@@ -104,6 +108,8 @@ def parse_args():
                              "frequency-weighted mean 1, early stopping on the unweighted val loss.")
     parser.add_argument("--rr-lookback", type=int, default=RR_LOOKBACK,
                         help=f"Intervals averaged into local_mean_rr (default {RR_LOOKBACK}; step 3a: 30).")
+    parser.add_argument("--normalize-rr", action="store_true",
+                        help="Standardize the R-R features with each model's own training-view mean/std (step 3b).")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42],
                         help="Run the full CV + final model once per seed (e.g. 42 43 44).")
     parser.add_argument("--artifacts-dir", default=os.path.join("artifacts", "dechazal"))
@@ -137,11 +143,12 @@ def parse_args():
 
 
 def run_config(args):
-    return {"classes": args.classes, "loss_weights": args.loss_weights, "rr_lookback": args.rr_lookback}
+    return {"classes": args.classes, "loss_weights": args.loss_weights, "rr_lookback": args.rr_lookback,
+            "normalize_rr": args.normalize_rr}
 
 
 def existing_configs(artifacts_dir):
-    """{run dir: {"classes", "loss_weights", "rr_lookback"}} of the runs under <artifacts_dir>/cv/ (DEFAULT_CONFIG for runs
+    """{run dir: {"classes", "loss_weights", "rr_lookback", "normalize_rr"}} of the runs under <artifacts_dir>/cv/ (DEFAULT_CONFIG for runs
     written before the flags existed)."""
     out = {}
     for path in sorted(glob.glob(os.path.join(artifacts_dir, "cv", "*", "metrics.json"))):
@@ -152,10 +159,11 @@ def existing_configs(artifacts_dir):
 
 
 def row_label(args):
-    """`variant` in the comparison tables: e.g. bn_folded, bn_folded+unweighted, bn_folded+nsv, bn_folded+nsv+rr30."""
+    """`variant` in the comparison tables: e.g. bn_folded, bn_folded+unweighted, bn_folded+nsv+rr30+rr_norm."""
     label = args.variant + ("+nsv" if args.classes == "nsv" else "")
     label += {"matched": "", "none": "+unweighted", "balanced": "+balanced"}[args.loss_weights]
-    return label + ("" if args.rr_lookback == RR_LOOKBACK else f"+rr{args.rr_lookback}")
+    label += "" if args.rr_lookback == RR_LOOKBACK else f"+rr{args.rr_lookback}"
+    return label + ("+rr_norm" if args.normalize_rr else "")
 
 
 def loss_weights(args, fit_labels):
@@ -192,6 +200,16 @@ def loss_record(args, fit_labels, weights):
     else:
         scale = loss_scale(fit_labels, weights, n_classes=len(NSV_CLASSES))
     return {"weights": list(weights) if isinstance(weights, tuple) else weights, "loss_scale": scale}
+
+
+def rr_normalizer(args, X_rr_train):
+    """(record, transform) for one model's R-R inputs. With --normalize-rr the statistics are fitted on
+    `X_rr_train`, that model's own training view, and `transform` applies them to any of its inputs;
+    otherwise `record` is None and `transform` is the identity."""
+    if not args.normalize_rr:
+        return None, lambda X: X
+    mean, std = fit_rr_normalizer(X_rr_train)
+    return {"mean": mean.tolist(), "std": std.tolist()}, lambda X: apply_rr_normalizer(X, mean, std)
 
 
 def run_dir(args, seed):
@@ -248,7 +266,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     # Per fold: raw model outputs on the held-out fold ((n,) binary, (n, 3) N/S/V), and the fold model's
     # DS2 abnormal scores (diagnostic).
-    best_epochs, oof_float, oof_int8, test_int8_by_fold, fold_losses = [], [], [], [], []
+    best_epochs, oof_float, oof_int8, test_int8_by_fold, fold_losses, fold_rr_norms = [], [], [], [], [], []
     stop_on = monitor_loss(args, ecg_model)
     for k, (tr, ho) in enumerate(zip(train_masks, held_out_masks)):
         print(f"\n=== seed {seed}, fold {k}: hold out {train.CV_FOLDS[k]} ===", flush=True)
@@ -257,18 +275,21 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
         m = train.build_model(args.variant, spec_shape, tf, ecg_model, n_classes=n_classes)
         weights = loss_weights(args, fit_tr[tr])
         fold_losses.append(loss_record(args, fit_tr[tr], weights))
+        rr_norm, rr = rr_normalizer(args, X_tr_rr[tr])
+        fold_rr_norms.append(rr_norm)
+        rr_tr, rr_ho, rr_te = rr(X_tr_rr[tr]), rr(X_ev_rr[ho]), rr(X_te_rr)
         best_epochs.append(train.fit_model(
-            m, tf, ecg_model, [X_tr_spec[tr], X_tr_rr[tr]], fit_tr[tr],
-            ([X_ev_spec[ho], X_ev_rr[ho]], fit_ev[ho]), LEARNING_RATE, args.epochs, args.batch_size,
+            m, tf, ecg_model, [X_tr_spec[tr], rr_tr], fit_tr[tr],
+            ([X_ev_spec[ho], rr_ho], fit_ev[ho]), LEARNING_RATE, args.epochs, args.batch_size,
             loss=make_loss(args, ecg_model, weights), monitor_loss=stop_on,
         ))
         tflite_path = os.path.join(out_dir, "folds", f"fold{k}_int8.tflite")
         with open(tflite_path, "wb") as f:
-            f.write(export.convert_to_int8_tflite(m, X_tr_spec[tr], X_tr_rr[tr],
+            f.write(export.convert_to_int8_tflite(m, X_tr_spec[tr], rr_tr,
                                                   num_samples=args.calib_samples, seed=seed))
-        oof_float.append(_squeeze(m.predict([X_ev_spec[ho], X_ev_rr[ho]])))
-        oof_int8.append(evaluate.predict_tflite(tflite_path, X_ev_spec[ho], X_ev_rr[ho]))
-        test_int8_by_fold.append(evaluate.abnormal_score(evaluate.predict_tflite(tflite_path, X_te_spec, X_te_rr)))
+        oof_float.append(_squeeze(m.predict([X_ev_spec[ho], rr_ho])))
+        oof_int8.append(evaluate.predict_tflite(tflite_path, X_ev_spec[ho], rr_ho))
+        test_int8_by_fold.append(evaluate.abnormal_score(evaluate.predict_tflite(tflite_path, X_te_spec, rr_te)))
 
     probs_float, covered = cv.pool_oof(oof_float, held_out_masks)
     probs_int8, _ = cv.pool_oof(oof_int8, held_out_masks)
@@ -284,7 +305,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     folds = [
         fold_report(k, train.CV_FOLDS[k], best_epochs[k], y_ev[ho], sym_ev[ho], evaluate.abnormal_score(oof_int8[k]),
-                    y_te, test_int8_by_fold[k], threshold, evaluate) | {"loss": fold_losses[k]}
+                    y_te, test_int8_by_fold[k], threshold, evaluate) | {"loss": fold_losses[k], "rr_norm": fold_rr_norms[k]}
         for k, ho in enumerate(held_out_masks)
     ]
 
@@ -295,23 +316,28 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
     model = train.build_model(args.variant, spec_shape, tf, ecg_model, n_classes=n_classes)
     final_weights = loss_weights(args, fit_tr)
     final_loss = loss_record(args, fit_tr, final_weights)
-    train.fit_model(model, tf, ecg_model, [X_tr_spec, X_tr_rr], fit_tr, None, LEARNING_RATE, n_epochs,
+    final_rr_norm, rr = rr_normalizer(args, X_tr_rr)
+    rr_tr, rr_te = rr(X_tr_rr), rr(X_te_rr)
+    train.fit_model(model, tf, ecg_model, [X_tr_spec, rr_tr], fit_tr, None, LEARNING_RATE, n_epochs,
                     args.batch_size, loss=make_loss(args, ecg_model, final_weights))
     model.save(os.path.join(out_dir, "ecg_multiscale_model.keras"))
-    tflite_bytes = export.convert_to_int8_tflite(model, X_tr_spec, X_tr_rr,
+    tflite_bytes = export.convert_to_int8_tflite(model, X_tr_spec, rr_tr,
                                                  num_samples=args.calib_samples, seed=seed)
     tflite_path = os.path.join(out_dir, "model_int8.tflite")
     with open(tflite_path, "wb") as f:
         f.write(tflite_bytes)
 
-    test_probs = {"float": _squeeze(model.predict([X_te_spec, X_te_rr])),
-                  "int8": evaluate.predict_tflite(tflite_path, X_te_spec, X_te_rr)}
+    test_probs = {"float": _squeeze(model.predict([X_te_spec, rr_te])),
+                  "int8": evaluate.predict_tflite(tflite_path, X_te_spec, rr_te)}
     test_float, test_int8 = (evaluate.abnormal_score(test_probs[m]) for m in ("float", "int8"))
     oof = SimpleNamespace(y=y_oof, record_ids=rec_oof, symbols=sym_oof, float=pooled_float, int8=pooled_int8,
                           probs={"float": probs_float, "int8": probs_int8},
                           threshold=threshold, sweep=sweep, float_threshold=float_threshold, float_sweep=float_sweep)
-    write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, test_float, test_int8,
-                  tflite_bytes, tflite_path, evaluate, final_loss, test_class_probs=test_probs if multiclass else None)
+    # DS2 as the final model sees it (normalized R-R inputs with --normalize-rr).
+    ds2_final = (X_te_spec, rr_te, y_te, rec_te, sym_te)
+    write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2_final, test_float, test_int8,
+                  tflite_bytes, tflite_path, evaluate, final_loss, final_rr_norm,
+                  test_class_probs=test_probs if multiclass else None)
 
 
 def _squeeze(probs):
@@ -321,8 +347,10 @@ def _squeeze(probs):
 
 
 def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, test_float, test_int8,
-                  tflite_bytes, tflite_path, evaluate, final_loss, test_class_probs=None):
-    """`final_loss`: loss_record of the final model's loss; each fold's is in its folds.json entry."""
+                  tflite_bytes, tflite_path, evaluate, final_loss, final_rr_norm, test_class_probs=None):
+    """`final_loss`: loss_record of the final model's loss; each fold's is in its folds.json entry. `final_rr_norm`:
+    the final model's R-R statistics (None without --normalize-rr); each fold's are in folds.json. `ds2` holds the
+    R-R inputs as the final model sees them."""
     X_te_spec, X_te_rr, y_te, rec_te, sym_te = ds2
     threshold, float_threshold, sweep = oof.threshold, oof.float_threshold, oof.sweep
     float_overall, float_per_record = evaluate.evaluate_predictions(y_te, test_float, rec_te, threshold)
@@ -346,6 +374,9 @@ def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, t
             "min_precision": args.min_precision if args.threshold_strategy == "recall_at_precision" else None,
             "oof_metrics_at_threshold": sweep.loc[sweep["threshold"] == threshold].iloc[0].to_dict(),
         }, f, indent=2)
+    if final_rr_norm is not None:  # the final model's statistics, the source for a future rr_norm.h
+        with open(os.path.join(out_dir, "rr_norm.json"), "w") as f:
+            json.dump(final_rr_norm, f, indent=2)
     with open(os.path.join(out_dir, "folds.json"), "w") as f:
         json.dump({"best_epochs": best_epochs, "final_epochs": n_epochs, "threshold": threshold,
                    "early_stopping_monitor": early_stopping_monitor(args), "folds": folds}, f, indent=2)
@@ -356,6 +387,7 @@ def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, t
             "loss": {"focal_gamma": FOCAL_GAMMA, **final_loss,
                      "classes": list(NSV_CLASSES) if args.classes == "nsv" else ["N", "abnormal"],
                      "early_stopping_monitor": early_stopping_monitor(args)},
+            "rr_norm": final_rr_norm,
             "calib_samples": args.calib_samples,
             "final_epochs": n_epochs,
             "model_size_kb": model_size_kb,
