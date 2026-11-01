@@ -43,14 +43,14 @@ Stage 1 (diagnosis.md, "Stage 1") found that the S-beat failure is mainly in the
 
 1. Beat-only R-R intervals in `extract_beats_from_record`, then retrain the CV baseline (binary bn_folded, focal gamma 2 / alpha 0.25). Done; see diagnosis.md, "Stage 2 step 1 results".
    **1b:** read MLII by signal name (record 114's leads are swapped), then retrain the same baseline. That run is the baseline for 2a.
-2. **2a** (done; diagnosis.md, "Stage 2 step 2a results"): binary vs. N/S/V multiclass under two weightings, with focal gamma = 2 throughout. The pairs are unweighted (no alpha vs. no class weights) and matched (alpha 0.25 vs. N 0.75 / S 0.25 / V 0.25). N/S/V matched carries forward. **2b** (next): a three-way N/S/V comparison: nsv_unweighted, nsv_matched (reference and default) and nsv_balanced (inverse-frequency weights, frequency-weighted mean 1). Its decision rule and pre-declared follow-up are fixed in diagnosis.md, "Step 2b design". The threshold stays on `abnormal_score` (1 − P(N)). Report +P for S and V once a multiclass model exists. Multiclass is N/S/V only (F and Q are dropped); say so in the README wherever results are compared with the literature.
-3. Only if a gap remains after step 2: a 30-interval R-R lookback, then `--normalize-rr`.
+2. **2a** (done; diagnosis.md, "Stage 2 step 2a results"): binary vs. N/S/V multiclass under two weightings, with focal gamma = 2 throughout. The pairs are unweighted (no alpha vs. no class weights) and matched (alpha 0.25 vs. N 0.75 / S 0.25 / V 0.25). N/S/V matched carries forward. **2b** (done; diagnosis.md, "Stage 2 step 2b results"): a three-way N/S/V comparison of nsv_unweighted, nsv_matched and nsv_balanced (inverse-frequency weights, frequency-weighted mean 1). No cell won on S PR-AUC, and balanced failed the V guard, so nsv_matched carries forward and the nsv_matched_normalized follow-up is skipped. The threshold stays on `abnormal_score` (1 − P(N)). Report +P for S and V once a multiclass model exists. Multiclass is N/S/V only (F and Q are dropped); say so in the README wherever results are compared with the literature.
+3. **Step 3** (next; a gap remains after step 2): **3a** is a 30-interval R-R lookback against nsv_matched. **3b** is `--normalize-rr` on top of the 3a winner, or on top of nsv_matched if 3a has no winner. Every step 3 cell uses seeds 42–46, the nsv_matched reference included (seeds 45 and 46 added for step 3 only). The decision rule, the normalization's leakage checks and the firmware needs are fixed in diagnosis.md, "Step 3 design". After step 3, decide whether the SVDB/INCART training-data work starts before steps 4 and 5.
 4. Global average pooling instead of Flatten. Flatten → Dense holds 197,184 of the ~202.2k parameters.
 5. Re-measure the AF/flutter normal-beat FPs. Wide-QRS FPs and record 124's `J` beats are known limitations.
 
 **Rules for every step:**
 - One change at a time.
-- Retrain under grouped CV with seeds 42, 43, 44.
+- Retrain under grouped CV with seeds 42, 43, 44 (42–46 from step 3 on).
 - Decide only on OOF per-class (S vs N, V vs N) ROC-AUC and PR-AUC. Never use DS2 for a choice.
 - A change counts only if its gain exceeds the measured seed-to-seed spread.
 - Make the decision table with `scripts/compare_oof.py`, using the previous step's runs as the reference. The INT8 rows decide. For 2a, run it once per weighting row, with that row's binary run as the reference. Its P(S)/P(V) AUCs and S<->V counts are descriptive only, and its INT8-minus-float table is the quantization check.

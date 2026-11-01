@@ -1,6 +1,6 @@
 # ECG classifier: investigation and experiment log
 
-> **Current status:** Stage 2 is in progress. The latest results are in the last section, "Stage 2 step 1b results: MLII by signal name". That run is the reference for step 2a, binary vs. N/S/V multiclass. The remaining steps are in "Stage 2 plan". No model has been exported to firmware since the old-split baseline.
+> **Current status:** Stage 2 is in progress. The latest results are in the last section, "Stage 2 step 2b results: balanced class weights": no weighting wins, so nsv_matched (N/S/V, weights N 0.75 / S 0.25 / V 0.25) carries forward. Step 3 (R-R representation) is designed in "Step 3 design" at the end of that section, before any step 3 run. The remaining steps are in "Stage 2 plan". No model has been exported to firmware since the old-split baseline.
 
 ## Contents
 
@@ -14,6 +14,8 @@ Investigations in the order they were run, each with its outcome:
 - **Stage 2 plan:** the fixes in order, one at a time, each decided on OOF per-class AUC against the seed-to-seed spread.
 - **Stage 2 step 1 results: beat-only R-R:** a real V gain (INT8 OOF V PR-AUC 0.860 → 0.894); the S gain is within the seed spread.
 - **Stage 2 step 1b results: MLII by signal name:** record 114's swapped leads are fixed, with no pooled gain beyond the seed spread. The S gap is still open.
+- **Stage 2 step 2a results: binary vs. N/S/V:** no structural multiclass benefit; N/S/V matched shows no loss against binary and carries forward for AAMI comparability and a separate S weight.
+- **Stage 2 step 2b results: balanced class weights:** no weighting wins on S PR-AUC. Balanced weights fail the V guard and mainly shift scores up rather than ranking S better. nsv_matched carries forward; step 3 is designed with 5 seeds.
 
 > **Old split.** "Float → INT8 gap" and "Validation/test mismatch" use the old hand-picked train/val/test split, as does every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …). Everything from "de Chazal split results" on uses the de Chazal split; those results are in `artifacts/dechazal/` (see README.md, "Data split").
 
@@ -494,7 +496,7 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 
 **Rules for every step:**
 - One change at a time.
-- Each change is retrained under grouped CV (`train_cv.py`) with seeds 42, 43, 44.
+- Each change is retrained under grouped CV (`train_cv.py`) with seeds 42, 43, 44. From step 3 on, seeds 42–46, the reference included ("Step 3 design").
 - Decisions use only OOF per-class (S vs N, V vs N) ROC-AUC and PR-AUC. DS2 results are reported and never used for a choice.
 - A change counts only if its gain is larger than the measured seed-to-seed spread.
 - The decision table is `scripts/compare_oof.py`, run with the previous step's runs as the reference. Its INT8 rows decide, since INT8 is what's deployed; float rows are shown alongside.
@@ -534,9 +536,10 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
   - 2b compares weighted with unweighted losses. Raw inverse-frequency weights would change the data loss's overall scale, and with it the balance against L2.
   - Normalizing keeps that scale fixed, so only the class balance changes.
 
-**Step 3: R-R representation, only if a gap remains after step 2.**
+**Step 3: R-R representation, only if a gap remains after step 2.** A gap remains, so step 3 runs. The full design, fixed before any step 3 run, is in "Stage 2 step 2b results", "Step 3 design".
 - 3a: 30-interval lookback window.
-- 3b: global standardization (`--normalize-rr`).
+- 3b: global standardization (`--normalize-rr`), on top of the 3a winner or nsv_matched.
+- Afterwards: decide whether the SVDB/INCART data work starts before steps 4 and 5.
 - The median-based ratio is dropped (step 2 of Stage 1).
 
 **Step 4: global average pooling instead of Flatten.**
@@ -589,7 +592,7 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
   - Check that the annotation symbols map to the AAMI classes correctly (`SYMBOL_MAP`, `AAMI_CLASSES`).
   - Group CV folds by patient, since INCART has several recordings per patient.
 - **When:** after the Stage 2 experiments, so there is a DS1-only baseline to compare against.
-- **Success test:** pooled OOF S-beat PR-AUC (S vs. N) improves by more than the seed spread (seeds 42–44).
+- **Success test:** pooled OOF S-beat PR-AUC (S vs. N) improves by more than the seed spread (seeds 42–44; 42–46 if the work follows step 3, see "Step 3 design").
   - Also recorded, but not pass/fail: S recall at the operating point that gives 0.90 overall abnormal recall on the pooled OOF scores. `compare_oof.py` doesn't report this yet; it reports S recall at the selected threshold.
   - The OOF pool stays the DS1 records; external recordings are only ever in training.
   - Decisions come from OOF results (`compare_oof.py`, INT8 rows), never DS2.
@@ -872,3 +875,107 @@ Class counts in each training view (capped, before augmentation) and the balance
 | all DS1 (final model) | 13,200 / 943 / 3,788 | 0.736 / 0.053 / 0.211 | 0.453 / 6.338 / 1.578 |
 
 Fold 0 holds out 209, 203 and 215, which carry 388 of the 943 S beats in this view, most of them from 209. So fold 0's S weight is the largest (9.1).
+
+## Stage 2 step 2b results: balanced class weights
+
+nsv_balanced was trained with seeds 42, 43 and 44 (`train_cv.py --classes nsv --loss-weights balanced`, in `stage2/step2b_nsv_balanced`). Each run's per-fold and final weights equal the "Step 2b design" table, its loss scale is 1, and every fold model early-stopped on the unweighted val loss. The OOF pool is the same 48,596 beats as in 2a.
+
+**Decision metrics: pooled OOF, INT8.** Seeds 42 / 43 / 44, then mean ± std. Tables: `stage2/step2b/oof_comparison.md` (reference nsv_matched, with nsv_unweighted, nsv_balanced and step 1b) and `stage2/step2b/vs_unweighted/oof_comparison.md` (reference nsv_unweighted).
+
+| Metric | nsv_matched | nsv_unweighted | nsv_balanced | step 1b (reference row) |
+|---|---|---|---|---|
+| **S PR-AUC (primary)** | 0.118 / 0.087 / 0.168 = 0.124 ± 0.041 | 0.213 / 0.104 / 0.115 = 0.144 ± 0.060 | 0.136 / 0.172 / 0.094 = 0.134 ± 0.039 | 0.096 / 0.151 / 0.232 = 0.160 ± 0.068 |
+| S ROC-AUC | 0.862 ± 0.030 | 0.824 ± 0.038 | 0.808 / 0.872 / 0.783 = 0.821 ± 0.046 | 0.801 ± 0.037 |
+| V PR-AUC (guard) | 0.904 / 0.899 / 0.934 = 0.912 ± 0.019 | 0.883 ± 0.003 | 0.826 / 0.879 / 0.856 = 0.853 ± 0.027 | 0.914 ± 0.025 |
+| V ROC-AUC | 0.977 ± 0.005 | 0.969 ± 0.001 | 0.971 ± 0.006 | 0.977 ± 0.006 |
+
+- **No cell clears the rule.** S PR-AUC gains, against the larger seed std of the pair:
+  - balanced − matched: +0.010 (spread 0.041); balanced − unweighted: −0.010 (spread 0.060)
+  - unweighted − matched: +0.020 (spread 0.060); unweighted − balanced: +0.010 (spread 0.060)
+  - matched has the lowest mean, so it beats neither.
+- **nsv_balanced also fails the V guard, and the loss is separated.** V PR-AUC is 0.059 below nsv_matched (spread 0.027); balanced's best seed (0.879) is below matched's worst (0.899). It is also 0.030 below nsv_unweighted (spread 0.027, separated).
+- The float rows give the same verdicts. INT8 − float: the largest per-seed gap of any decision metric for nsv_balanced is 0.008 (V PR-AUC).
+- **Decision (rule pre-declared in "Step 2b design"): nsv_matched carries forward.** The result is read as evidence that loss weighting isn't the main lever for S. The nsv_matched_normalized follow-up was conditional on a balanced win, so it is skipped.
+
+**Balanced weights mainly shift scores up; they don't rank S better (descriptive).**
+- Median OOF abnormal score of S beats: 0.624 ± 0.033 (balanced), against 0.337 ± 0.060 (matched) and 0.473 ± 0.135 (unweighted). The pooled-OOF thresholds move up with it: 0.75 / 0.80 / 0.85, against 0.65 / 0.60 / 0.50 for matched.
+- S ranking doesn't improve: S ROC-AUC on the abnormal score is 0.821 ± 0.046, against 0.862 ± 0.030 (matched). On the class's own probability P(S) it is worse in every seed: 0.715 / 0.727 / 0.650 = 0.697 ± 0.041, against 0.805 ± 0.074 (matched) and 0.752 ± 0.074 (unweighted).
+- **At each run's selected threshold:**
+  - FN side: S recall (flagged abnormal) is 0.321 ± 0.086, against 0.188 ± 0.105 for matched.
+  - FP side: the N false-positive rate rises to 0.023 ± 0.005, against 0.013 ± 0.004.
+- **At target recall 0.90:**
+  - FN side: S flagged 0.665 ± 0.037 (matched 0.665 ± 0.044), S under the call rule 0.455 ± 0.111 (matched 0.463 ± 0.043), V under the call rule 0.856 ± 0.027 (matched 0.844 ± 0.006).
+  - FP side: 7,742 ± 1,941 N false positives (matched 5,020 ± 2,693), precision 0.345 ± 0.057 (matched 0.468 ± 0.137), +P_S 0.094 ± 0.012 (matched 0.141 ± 0.097), +P_V 0.421 ± 0.121 (matched 0.592 ± 0.029).
+  - At target recall 0.95: 17,740 ± 5,772 FPs (matched 11,718 ± 3,295), +P_S 0.041 ± 0.014 (matched 0.067 ± 0.023).
+- **S ↔ V mix-ups at the selected threshold:** S called V 175 / 14 / 107, V called S 177 / 296 / 226.
+- **Per-record S ranking (OOF INT8 ROC-AUC, seeds 42 / 43 / 44):**
+  - 124 falls to 0.375 / 0.566 / 0.252 (matched 0.754 / 0.512 / 0.724).
+  - 209: 0.867 / 0.895 / 0.907, between matched (0.975 / 0.931 / 0.917) and step 1b (0.809 / 0.814 / 0.708).
+  - 118 varies less across seeds than under matched: 0.972 / 0.818 / 0.930, against 0.384 / 0.898 / 0.984.
+  - 207, 220 and 223: 0.814–0.991.
+
+**DS2, final models (INT8, at each seed's pooled-OOF threshold; reported, never used for a choice):**
+
+| Cell | PR-AUC | F1 | FP | FN | Se_S | +P_S | Se_V | +P_V |
+|---|---|---|---|---|---|---|---|---|
+| nsv_balanced | 0.786 ± 0.062 | 0.729 ± 0.003 | 1,545 ± 1,032 | 1,266 ± 611 | 0.164 ± 0.022 | 0.261 ± 0.045 | 0.915 ± 0.010 | 0.754 ± 0.198 |
+
+- Seed 43 calls 1,012 of DS2's 1,836 S beats V (seeds 42 and 44: 182 and 105). It also has 2,736 FPs, against 931 and 967.
+- Final epochs are 14 / 26 / 14. The unresolved final-model procedure applies, as in every cell.
+
+**Where Stage 2 stands after step 2.** S PR-AUC hasn't moved beyond the seed spread in steps 1, 1b, 2a or 2b: every cell is between 0.12 and 0.16, with seed std 0.04–0.07. The gap after step 2 is large, so step 3 runs. Its design is below, fixed before any step 3 run.
+
+### Step 3 design
+
+Fixed before any step 3 run.
+
+- **Cells, all N/S/V with matched weights (N 0.75 / S 0.25 / V 0.25), focal gamma 2, early stopping on their own val_loss:**
+  - **nsv_matched**, the reference. Seeds 42–44 are the 2a runs. Seeds 45 and 46 are new, trained with the same configuration.
+  - Directories: the reference's runs are in `stage2/step3_nsv_matched`. Its seeds 42–44 are byte-identical copies of the `stage2/step2a_nsv_matched` run dirs, so 2a's committed tables stay the 3-seed record. 3a goes to `stage2/step3a_rr30` and 3b to `stage2/step3b_rr_norm`.
+  - **3a, nsv_rr30:** nsv_matched with a 30-interval R-R lookback instead of 10 (`train_cv.py --rr-lookback 30`).
+  - **3b, rr_norm:** `--normalize-rr` on top of the 3a winner, or on top of nsv_matched if 3a has no winner.
+- **Seeds: 42, 43, 44, 45 and 46 in every step 3 cell, the reference included.**
+  - This is declared before any step 3 result, in response to the 2b observation that with 3 seeds only gains of about 0.04–0.07 in S PR-AUC can count.
+  - What 5 seeds buy: the means and the spread estimate are more reliable. A real gain larger than the spread is less likely to be masked by one unlucky seed, and a 3-seed std that is small by chance (V PR-AUC for nsv_unweighted: 0.003) can't set the bar.
+  - What they don't buy: the rule's bar is the seed std itself, not a standard error, so it doesn't shrink with more seeds. The smallest gain that can count stays about one seed std.
+  - The added nsv_matched seeds are used only in step 3. The 2a and 2b decisions stand as made on seeds 42–44 ("No seeds are added after seeing the 2b results").
+  - No seeds are added after seeing step 3 results.
+- **Decision, for 3a and again for 3b:**
+  - Primary metric: pooled-OOF INT8 S PR-AUC.
+  - The candidate wins only if its mean beats the reference's by more than the larger of the two runs' seed std (over seeds 42–46).
+  - Guard: its V PR-AUC must not fall below the reference's by more than the larger seed std.
+  - `separated`, S and V ROC-AUC, the float rows, P(S) / P(V) AUCs, operating points and per-record AUCs are reported, not decisive.
+  - 3a's reference is nsv_matched. 3b's reference is the cell it builds on: the 3a winner, or nsv_matched.
+  - If neither 3a nor 3b wins, nsv_matched carries forward. The result is then read as evidence that R-R representation isn't the main lever for S either.
+- **What 3a changes.** `local_mean_rr` becomes the mean of the 30 intervals before the beat (the window includes `pre_rr`, as with 10), and `rr_ratio` = `pre_rr` / that mean. `pre_rr`, `post_rr` and `pre_post_ratio` are unchanged.
+  - The beat set doesn't change: a beat is usable if it has a beat annotation on each side, whatever the lookback. So the OOF pool stays the same 48,596 beats.
+  - Near the start of a record, fewer than 30 intervals exist, and the window uses the ones available, as the 10-interval window does now.
+  - Motivation: Stage 1, step 2. 209's SVTA runs fill the 10-interval window and mask prematurity. A 30-interval mean drops their median `rr_ratio` from 0.950 to 0.825 and raises pooled single-feature S-vs-N AUC from 0.727 to 0.849, but only 0.916 → 0.923 inside the 5-feature logistic regression.
+- **What 3b changes.** Each R-R feature is standardized, (x − mean) / std, with statistics fitted on the training view of the model that uses them:
+  - a fold model's: DS1 minus the held-out fold, after the 600-per-record normal cap and augmentation, exactly the arrays it trains on
+  - the final model's: the same view of all DS1
+  - The same statistics are applied to that model's held-out fold, its DS2 inputs and its INT8 calibration sample. They are never fitted on held-out or DS2 beats. Each run records them per fold and for the final model in `folds.json` / `metrics.json`.
+  - A per-feature affine change could in principle be absorbed by the first Dense layer. Any effect therefore comes through optimization (initialization scale, the fixed L2 penalty, Adam step sizes) or through INT8: the R-R input is one tensor with one scale and zero point, shared by features with very different ranges (intervals in seconds, and ratios whose maximum was 8.76 in the old split's training set; see "3. R-R values outside the representable range"). The INT8 − float table is reported for 3b as for every step.
+
+**Leakage checks for the normalization.**
+- **Fitted per model, on its own training view.** Fitting once on all of DS1 would put each held-out fold's R-R distribution into the statistics of the fold model scored on it. A test checks that a fold's statistics don't change when its held-out beats change.
+- **Global, not per-recording.** 3b does not standardize each record by its own statistics. Per-recording statistics over a 30-minute recording use beats after the one being classified, so they can't run on a device in real time. They also carry the patient's rhythm, so a record dense with S beats would shift its own mean. A causal, running per-patient version is a different experiment (`local_mean_rr` / `rr_ratio` already are one), and it isn't in step 3.
+- **The statistics come from the capped view.** Training keeps 600 N per record (73% N, against 91% in the uncapped OOF pool), so the means and stds are those of the training mix, not of any patient population. That is correct for the model trained on them, but it means the firmware's statistics must be the final model's own, not recomputed from other data.
+- **Not changed by step 3, recorded here for deployment:**
+  - `post_rr` and `pre_post_ratio` need the next beat, so on a device every classification waits one beat. That is a latency, not a leak.
+  - The band-pass filter uses `filtfilt` (zero-phase, non-causal) over the whole recording. The firmware will need a causal filter; that preprocessing mismatch is a separate, existing issue.
+
+**What the firmware would need.**
+- **If 3a wins:** a ring buffer of the last 30 beat-to-beat intervals from the on-device R-peak detector (120 bytes as floats). Until it fills, the mean runs over the intervals available, which matches the truncated window at the start of a training record.
+- **If 3b wins:**
+  - `rr_norm.h` (per-feature mean and std, `export.write_rr_norm_header`) from the final model's training view, generated in the same run as `model_data.h` and `threshold.h`. They are a pair: a stale `rr_norm.h` would silently shift every R-R input.
+  - In `deployment_model.ino`: z = (x − mean) / std for each of the 5 features, then `quantize_float_to_int8` with the R-R input tensor's scale and zero point. Those change with the normalization and are regenerated with the model.
+  - `train.py` refuses `--normalize-rr` with firmware export until the firmware applies it. That guard lifts in the same change.
+- Firmware export stays blocked until the final-model procedure is fixed ("Required before deployment").
+
+**Decision point after step 3.** Once step 3 is decided, and before step 4, decide whether to start the SVDB/INCART training-data work ("Parked idea: add training data from other PhysioNet databases") ahead of Stage 2's remaining steps 4 (global average pooling) and 5 (false-positive re-check). The inputs:
+- whether S PR-AUC moved beyond the seed spread in any of steps 1–3
+- how much of the S result rests on few patients: 209 holds 383 of DS1's 944 S beats, 124's S ranking is near chance in every cell, and 118's swings by seed
+- the step 3 per-record S AUCs
+
+The data work's success test would then use the step 3 reference with seeds 42–46.
