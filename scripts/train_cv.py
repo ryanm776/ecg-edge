@@ -14,7 +14,8 @@ All thresholds run on evaluate.abnormal_score (P(abnormal) for binary output, 1 
 `--classes nsv` trains an N/S/V softmax model instead of the binary one, and `--loss-weights none` drops the
 focal loss's class weighting (Stage 2 step 2a). `--loss-weights balanced` (N/S/V only, step 2b) weights each class
 by inverse frequency in the model's own training view, normalized to a frequency-weighted mean of 1, and early-stops
-on the unweighted validation loss, the criterion of `--loss-weights none`. One artifacts dir holds one configuration.
+on the unweighted validation loss, the criterion of `--loss-weights none`. `--rr-lookback` sets how many R-R intervals
+`local_mean_rr` averages, for every view (training, OOF, DS2; Stage 2 step 3a). One artifacts dir holds one configuration.
 Writes <artifacts-dir>/cv/<variant>_seed<S>/ per seed and <artifacts-dir>/cv_comparison.{csv,md} plus
 cv_comparison_seeds.csv over all runs found there. In the tables, `int8_val`/`float_val` and `val_f1` refer
 to the pooled out-of-fold predictions, which play the role of validation.
@@ -38,7 +39,9 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 import compare_variants  # noqa: E402  (pandas only)
 import train  # noqa: E402  (numpy/pandas only)
-from ecg.features import NSV_CLASSES, balanced_class_weights, loss_scale, nsv_labels, type_recall  # noqa: E402
+from ecg.features import (  # noqa: E402
+    NSV_CLASSES, RR_LOOKBACK, balanced_class_weights, loss_scale, nsv_labels, type_recall,
+)
 
 VARIANTS = ["bn_folded"]
 LEARNING_RATE = 0.001
@@ -55,8 +58,8 @@ LOSS_WEIGHTS = {
 # Step 2b: a balanced fold model early-stops on the unweighted val loss (plus L2), as `none` does, not on its
 # S-heavy weighted val loss over the patients it is then scored on (diagnosis.md, "Step 2b design").
 UNWEIGHTED_MONITOR = {"balanced"}
-# The configuration of runs written before --classes / --loss-weights existed.
-DEFAULT_CONFIG = {"classes": "binary", "loss_weights": "matched"}
+# The configuration of runs written before --classes / --loss-weights / --rr-lookback existed.
+DEFAULT_CONFIG = {"classes": "binary", "loss_weights": "matched", "rr_lookback": RR_LOOKBACK}
 CV_COLUMNS = [
     "run", "variant", "calib_samples", "seed", "final_epochs", "model", "threshold_from", "threshold", "val_f1",
     "test_precision", "test_recall", "test_f1", "tp", "fp", "fn", "se_V", "pp_V", "se_S", "pp_S", "S_as_V", "V_as_S",
@@ -99,6 +102,8 @@ def parse_args():
                         help="matched: binary alpha 0.25 / N/S/V weights 0.75, 0.25, 0.25; none: weight 1 on every "
                              "beat; balanced (N/S/V only): inverse class frequency in the training view, "
                              "frequency-weighted mean 1, early stopping on the unweighted val loss.")
+    parser.add_argument("--rr-lookback", type=int, default=RR_LOOKBACK,
+                        help=f"Intervals averaged into local_mean_rr (default {RR_LOOKBACK}; step 3a: 30).")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42],
                         help="Run the full CV + final model once per seed (e.g. 42 43 44).")
     parser.add_argument("--artifacts-dir", default=os.path.join("artifacts", "dechazal"))
@@ -117,6 +122,8 @@ def parse_args():
     args = parser.parse_args()
     if len(set(args.seeds)) != len(args.seeds):
         parser.error("--seeds has duplicates")
+    if args.rr_lookback < 1:
+        parser.error("--rr-lookback must be at least 1")
     if (args.classes, args.loss_weights) not in LOSS_WEIGHTS:
         parser.error(f"--loss-weights {args.loss_weights} needs --classes nsv")
     existing = [run_dir(args, s) for s in args.seeds if os.path.exists(os.path.join(run_dir(args, s), "folds.json"))]
@@ -130,11 +137,11 @@ def parse_args():
 
 
 def run_config(args):
-    return {"classes": args.classes, "loss_weights": args.loss_weights}
+    return {"classes": args.classes, "loss_weights": args.loss_weights, "rr_lookback": args.rr_lookback}
 
 
 def existing_configs(artifacts_dir):
-    """{run dir: {"classes", "loss_weights"}} of the runs under <artifacts_dir>/cv/ (DEFAULT_CONFIG for runs
+    """{run dir: {"classes", "loss_weights", "rr_lookback"}} of the runs under <artifacts_dir>/cv/ (DEFAULT_CONFIG for runs
     written before the flags existed)."""
     out = {}
     for path in sorted(glob.glob(os.path.join(artifacts_dir, "cv", "*", "metrics.json"))):
@@ -145,9 +152,10 @@ def existing_configs(artifacts_dir):
 
 
 def row_label(args):
-    """`variant` in the comparison tables: e.g. bn_folded, bn_folded+unweighted, bn_folded+nsv."""
+    """`variant` in the comparison tables: e.g. bn_folded, bn_folded+unweighted, bn_folded+nsv, bn_folded+nsv+rr30."""
     label = args.variant + ("+nsv" if args.classes == "nsv" else "")
-    return label + {"matched": "", "none": "+unweighted", "balanced": "+balanced"}[args.loss_weights]
+    label += {"matched": "", "none": "+unweighted", "balanced": "+balanced"}[args.loss_weights]
+    return label + ("" if args.rr_lookback == RR_LOOKBACK else f"+rr{args.rr_lookback}")
 
 
 def loss_weights(args, fit_labels):
@@ -227,7 +235,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
     # Training view of DS1: normal-beat cap and augmentation, like train.py's train set.
     X_tr_spec, X_tr_rr, y_tr, rec_tr, sym_tr = data.build_dataset(
         train.DS1_RECORDS, args.data_dir, max_normal_per_record=args.max_normal_per_record_train,
-        augment=True, seed=seed, return_symbols=True,
+        augment=True, seed=seed, return_symbols=True, rr_lookback=args.rr_lookback,
     )
     spec_shape = X_tr_spec.shape[1:]
     # Training targets; the binary y_ev / y_te stay the labels for every threshold and metric.
@@ -392,9 +400,9 @@ def main():
 
         # Evaluation views are seed-independent: uncapped, unaugmented.
         ds1_eval = data.build_dataset(train.DS1_RECORDS, args.data_dir, max_normal_per_record=None,
-                                      augment=False, return_symbols=True)
+                                      augment=False, return_symbols=True, rr_lookback=args.rr_lookback)
         ds2 = data.build_dataset(train.DS2_RECORDS, args.data_dir, max_normal_per_record=None,
-                                 augment=False, return_symbols=True)
+                                 augment=False, return_symbols=True, rr_lookback=args.rr_lookback)
         for seed in args.seeds:
             start = time.monotonic()
             run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, cv)

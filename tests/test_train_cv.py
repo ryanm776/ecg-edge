@@ -37,9 +37,10 @@ def test_train_cv_args(monkeypatch, tmp_path):
     args = _parse(monkeypatch)
     assert args.variant == "bn_folded" and args.seeds == [42]
     # The defaults are the step 1b configuration.
-    assert train_cv.run_config(args) == train_cv.DEFAULT_CONFIG == {"classes": "binary", "loss_weights": "matched"}
+    assert train_cv.run_config(args) == train_cv.DEFAULT_CONFIG == {"classes": "binary", "loss_weights": "matched",
+                                                                    "rr_lookback": 10}
     assert Path(args.artifacts_dir) == Path("artifacts") / "dechazal"
-    for argv in (["--variant", "baseline"], ["--seeds", "42", "42"]):
+    for argv in (["--variant", "baseline"], ["--seeds", "42", "42"], ["--rr-lookback", "0"]):
         with pytest.raises(SystemExit):
             _parse(monkeypatch, *argv)
 
@@ -58,7 +59,7 @@ def test_train_cv_refuses_to_overwrite_existing_runs(monkeypatch, tmp_path):
     assert _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--seeds", "42").seeds == [42]
 
 def _fake_build_dataset(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
-                        return_symbols=False, rr_from_all_annotations=False):
+                        return_symbols=False, rr_from_all_annotations=False, rr_lookback=10):
     rng = np.random.default_rng(len(record_list) + int(augment))
     n = len(SYMBOLS) * len(record_list)
     symbols = np.tile(SYMBOLS, len(record_list))
@@ -123,7 +124,7 @@ def test_train_cv_caps_normal_beats_in_training_only(monkeypatch, tmp_path):
     calls = []
 
     def capped_fake(record_list, data_dir, max_normal_per_record=None, augment=False, seed=None,
-                    return_symbols=False, rr_from_all_annotations=False):
+                    return_symbols=False, rr_from_all_annotations=False, rr_lookback=10):
         calls.append({"records": list(record_list), "cap": max_normal_per_record, "augment": augment})
         X_spec, X_rr, y, record_ids, symbols = _fake_build_dataset(record_list, data_dir, augment=augment,
                                                                    return_symbols=True)
@@ -207,9 +208,13 @@ def test_train_cv_refuses_to_mix_configurations_in_one_dir(monkeypatch, tmp_path
     _write_run(nsv_dir, "bn_folded_seed42", {"classes": "nsv", "loss_weights": "none"})
     args = _parse(monkeypatch, "--artifacts-dir", str(nsv_dir), "--seeds", "43", "--classes", "nsv",
                   "--loss-weights", "none")
-    assert train_cv.run_config(args) == {"classes": "nsv", "loss_weights": "none"}
+    assert train_cv.run_config(args) == {"classes": "nsv", "loss_weights": "none", "rr_lookback": 10}
     with pytest.raises(SystemExit):
         _parse(monkeypatch, "--artifacts-dir", str(nsv_dir), "--seeds", "43", "--classes", "nsv")
+    # Runs written before --rr-lookback existed read as the default lookback, 10.
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, *base, "--rr-lookback", "30")
+    assert _parse(monkeypatch, *base, "--rr-lookback", "10").rr_lookback == 10
 
 
 # Training labels for the loss tests: 6 N, 1 S, 3 V (binary: 6 normal, 4 abnormal).
@@ -296,3 +301,27 @@ def test_train_cv_nsv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
 
     summary = pd.read_csv(tmp_path / "cv_comparison_seeds.csv")
     assert (summary["variant"] == "bn_folded+nsv").all()
+
+
+def test_train_cv_rr_lookback_reaches_every_view_and_is_recorded(monkeypatch, tmp_path):
+    from ecg import data
+
+    calls = []
+
+    def spy(record_list, data_dir, **kwargs):
+        calls.append(kwargs.get("rr_lookback"))
+        return _fake_build_dataset(record_list, data_dir, **kwargs)
+
+    monkeypatch.setattr(data, "build_dataset", spy)
+    monkeypatch.setattr(sys, "argv", ["train_cv", "--epochs", "1", "--seeds", "42", "--calib-samples", "10",
+                                      "--artifacts-dir", str(tmp_path), "--classes", "nsv", "--rr-lookback", "30"])
+
+    train_cv.main()
+
+    assert calls == [30, 30, 30]  # DS1 OOF view, DS2, training view
+    metrics = json.loads((tmp_path / "cv" / "bn_folded_seed42" / "metrics.json").read_text())
+    assert (metrics["classes"], metrics["loss_weights"], metrics["rr_lookback"]) == ("nsv", "matched", 30)
+    assert set(pd.read_csv(tmp_path / "cv_comparison_seeds.csv")["variant"]) == {"bn_folded+nsv+rr30"}
+    # The directory now holds a lookback-30 configuration; the default lookback can't be added to it.
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--seeds", "43", "--classes", "nsv")
