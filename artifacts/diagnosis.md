@@ -558,6 +558,13 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - fair QAT
 - more training data from other PhysioNet databases (below)
 - the training normal-beat cap: cap vs. no cap, and random vs. first-N sampling under the cap (below)
+- nested validation, the fix for early stopping on the held-out fold (below)
+
+**Known limitation: early stopping on the held-out fold.** This affects every OOF result, Stage 2 included.
+- In grouped CV (`train_cv.py`), each fold model early-stops on its held-out fold, with best weights restored. Those same held-out beats become its OOF predictions.
+- So each fold model's stopping epoch is chosen on the patients it is then scored on. That makes the OOF metrics optimistic, by an amount not measured.
+- Comparisons between runs are fairer when the runs share a stopping criterion, since the bias then acts on all of them alike. That is why nsv_balanced stops on the unweighted val loss ("Step 2b design").
+- **Fix, parked until after Stage 2: nested validation.** An inner, patient-grouped split inside each fold's training records would choose the stopping epoch. The held-out fold would then be used only for scoring.
 
 **Parked idea: how the training cap samples normal beats.** Not changed in Stage 2.
 - **Current behavior:** training keeps the first 600 N beats of each DS1 record in annotation order (`--max-normal-per-record-train`, `extract_beats_from_record`). Evaluation (OOF, DS2, val) is uncapped.
@@ -842,8 +849,14 @@ Fixed before any 2b run.
   - matched: 0.627 / 0.618 / 0.615 / 0.620 / 0.608 in folds 0–4, and 0.618 on all of DS1
 
   So comparing balanced with matched changes two things at once: class balance, and loss scale (with it the relative L2 strength).
+- **Early stopping: nsv_balanced stops on the unweighted validation loss.**
+  - Fold models early-stop on their held-out fold, the same beats that become the OOF predictions (see "Known limitation: early stopping on the held-out fold" under "Parked").
+  - With balanced weights in the val loss, S beats would dominate the stopping criterion (S weight 5.5–9.1). The balanced cell would then pick its stopping epoch by S performance on exactly the patients it is scored on, and S PR-AUC is the 2b primary metric.
+  - So nsv_balanced keeps the balanced weights in its training loss, but early-stops on the unweighted focal loss plus L2 over the held-out fold. That is exactly the val_loss nsv_unweighted stopped on. `metrics.json` and `folds.json` record the monitor (`early_stopping_monitor`: `unweighted_val_loss`).
+  - nsv_unweighted and nsv_matched are the existing 2a runs. Each stopped on its own val_loss: unweighted for nsv_unweighted, and N 0.75 / S 0.25 / V 0.25 for nsv_matched, which is N-dominated.
+  - **Remaining asymmetry:** matched's criterion weights S at a third of N, while the unweighted criterion weights them equally. So nsv_balanced still stops on a slightly more S-sensitive criterion than nsv_matched. A 2b win also needs a win over nsv_unweighted, and that comparison uses an identical criterion, so the asymmetry alone can't produce a win.
 - **Pre-declared follow-up, only if nsv_balanced wins:**
-  - Train nsv_matched_normalized: the 0.75 / 0.25 / 0.25 ratios rescaled to a frequency-weighted mean of 1, seeds 42, 43, 44.
+  - Train nsv_matched_normalized: the 0.75 / 0.25 / 0.25 ratios rescaled to a frequency-weighted mean of 1, seeds 42, 43, 44. It early-stops on the unweighted validation loss, like nsv_balanced.
   - Compare it with nsv_balanced under the same rule, to tell whether the gain came from class balance or from scale.
   - If nsv_balanced doesn't win, the follow-up is skipped.
 

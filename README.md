@@ -129,6 +129,8 @@ Known limitations:
 python scripts/train_cv.py --seeds 42 43 44     # bn_folded only
 python scripts/train_cv.py --seeds 42 43 44 --classes nsv --loss-weights none \
     --artifacts-dir artifacts/dechazal/stage2/<step>   # N/S/V softmax, unweighted focal loss
+python scripts/train_cv.py --seeds 42 43 44 --classes nsv --loss-weights balanced \
+    --artifacts-dir artifacts/dechazal/stage2/<step>   # N/S/V softmax, inverse-frequency class weights
 ```
 
 - `--classes nsv` trains a softmax over N, S and V instead of the binary model. **The classes are N/S/V
@@ -136,6 +138,13 @@ python scripts/train_cv.py --seeds 42 43 44 --classes nsv --loss-weights none \
   with papers that report the full five AAMI classes.
 - `--loss-weights none` drops the focal loss's class weighting. The default, `matched`, is
   alpha 0.25 for binary, and N 0.75 / S 0.25 / V 0.25 for N/S/V.
+- `--loss-weights balanced` (N/S/V only) weights each class by its inverse frequency in the model's own
+  training data (each fold's, and all of DS1 for the final model). The weights are normalized so that
+  their frequency-weighted mean is 1, which keeps the loss at the scale of an unweighted one. Fold models
+  then early-stop on the *unweighted* validation loss, so the S-heavy weighting doesn't pick the
+  stopping epoch on the patients being scored.
+- Each run records its loss weights, loss scale (frequency-weighted mean weight) and early-stopping
+  criterion: per fold in `folds.json`, and for the final model in `metrics.json`.
 - One `--artifacts-dir` holds one configuration; `train_cv.py` refuses to mix them.
 
 A fixed 5-record validation set gives an unstable operating point: across seeds 42–44, bn_folded's
