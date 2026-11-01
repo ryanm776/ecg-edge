@@ -12,7 +12,9 @@ Per seed (bn_folded only; the baseline is retired from new experiments):
 
 All thresholds run on evaluate.abnormal_score (P(abnormal) for binary output, 1 - P(N) for multiclass).
 `--classes nsv` trains an N/S/V softmax model instead of the binary one, and `--loss-weights none` drops the
-focal loss's class weighting (Stage 2 step 2a). One artifacts dir holds one configuration.
+focal loss's class weighting (Stage 2 step 2a). `--loss-weights balanced` (N/S/V only, step 2b) weights each class
+by inverse frequency in the model's own training view, normalized to a frequency-weighted mean of 1, and early-stops
+on the unweighted validation loss, the criterion of `--loss-weights none`. One artifacts dir holds one configuration.
 Writes <artifacts-dir>/cv/<variant>_seed<S>/ per seed and <artifacts-dir>/cv_comparison.{csv,md} plus
 cv_comparison_seeds.csv over all runs found there. In the tables, `int8_val`/`float_val` and `val_f1` refer
 to the pooled out-of-fold predictions, which play the role of validation.
@@ -36,7 +38,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 import compare_variants  # noqa: E402  (pandas only)
 import train  # noqa: E402  (numpy/pandas only)
-from ecg.features import NSV_CLASSES, nsv_labels, type_recall  # noqa: E402
+from ecg.features import NSV_CLASSES, balanced_class_weights, loss_scale, nsv_labels, type_recall  # noqa: E402
 
 VARIANTS = ["bn_folded"]
 LEARNING_RATE = 0.001
@@ -48,7 +50,11 @@ LOSS_WEIGHTS = {
     ("binary", "none"): None,
     ("nsv", "matched"): (0.75, 0.25, 0.25),
     ("nsv", "none"): None,
+    ("nsv", "balanced"): "balanced",  # computed per training view (balanced_class_weights)
 }
+# Step 2b: a balanced fold model early-stops on the unweighted val loss (plus L2), as `none` does, not on its
+# S-heavy weighted val loss over the patients it is then scored on (diagnosis.md, "Step 2b design").
+UNWEIGHTED_MONITOR = {"balanced"}
 # The configuration of runs written before --classes / --loss-weights existed.
 DEFAULT_CONFIG = {"classes": "binary", "loss_weights": "matched"}
 CV_COLUMNS = [
@@ -89,8 +95,10 @@ def parse_args():
     parser.add_argument("--variant", choices=VARIANTS, default="bn_folded")
     parser.add_argument("--classes", choices=["binary", "nsv"], default="binary",
                         help="binary: one sigmoid P(abnormal); nsv: softmax over N/S/V (thresholds still on 1 - P(N)).")
-    parser.add_argument("--loss-weights", choices=["matched", "none"], default="matched",
-                        help="matched: binary alpha 0.25 / N/S/V weights 0.75, 0.25, 0.25; none: weight 1 on every beat.")
+    parser.add_argument("--loss-weights", choices=["matched", "none", "balanced"], default="matched",
+                        help="matched: binary alpha 0.25 / N/S/V weights 0.75, 0.25, 0.25; none: weight 1 on every "
+                             "beat; balanced (N/S/V only): inverse class frequency in the training view, "
+                             "frequency-weighted mean 1, early stopping on the unweighted val loss.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42],
                         help="Run the full CV + final model once per seed (e.g. 42 43 44).")
     parser.add_argument("--artifacts-dir", default=os.path.join("artifacts", "dechazal"))
@@ -109,6 +117,8 @@ def parse_args():
     args = parser.parse_args()
     if len(set(args.seeds)) != len(args.seeds):
         parser.error("--seeds has duplicates")
+    if (args.classes, args.loss_weights) not in LOSS_WEIGHTS:
+        parser.error(f"--loss-weights {args.loss_weights} needs --classes nsv")
     existing = [run_dir(args, s) for s in args.seeds if os.path.exists(os.path.join(run_dir(args, s), "folds.json"))]
     if existing and not args.aggregate_only and not args.overwrite:
         parser.error(f"runs already exist: {existing}; pass a new --artifacts-dir or --overwrite")
@@ -137,14 +147,43 @@ def existing_configs(artifacts_dir):
 def row_label(args):
     """`variant` in the comparison tables: e.g. bn_folded, bn_folded+unweighted, bn_folded+nsv."""
     label = args.variant + ("+nsv" if args.classes == "nsv" else "")
-    return label + ("+unweighted" if args.loss_weights == "none" else "")
+    return label + {"matched": "", "none": "+unweighted", "balanced": "+balanced"}[args.loss_weights]
 
 
-def make_loss(args, ecg_model):
+def loss_weights(args, fit_labels):
+    """The configuration's loss weights for a model trained on `fit_labels`: binary alpha, a per-class
+    tuple, or None (unweighted). Balanced weights depend on the training view; the others are fixed."""
     weights = LOSS_WEIGHTS[(args.classes, args.loss_weights)]
+    if weights == "balanced":
+        return tuple(float(w) for w in balanced_class_weights(fit_labels, len(NSV_CLASSES)))
+    return weights
+
+
+def make_loss(args, ecg_model, weights):
     if args.classes == "binary":
         return ecg_model.focal_loss(gamma=FOCAL_GAMMA, alpha=weights)
     return ecg_model.categorical_focal_loss(gamma=FOCAL_GAMMA, class_weights=weights)
+
+
+def monitor_loss(args, ecg_model):
+    """The loss fold models early-stop on, besides L2: None for the training loss's own val_loss."""
+    if args.loss_weights in UNWEIGHTED_MONITOR:
+        return make_loss(args, ecg_model, None)
+    return None
+
+
+def early_stopping_monitor(args):
+    return "unweighted_val_loss" if args.loss_weights in UNWEIGHTED_MONITOR else "val_loss"
+
+
+def loss_record(args, fit_labels, weights):
+    """Weights and loss scale (frequency-weighted mean weight) of one model's loss, for folds.json / metrics.json."""
+    if args.classes == "binary":
+        per_class = None if weights is None else (1 - weights, weights)
+        scale = loss_scale(fit_labels, per_class, n_classes=2)
+    else:
+        scale = loss_scale(fit_labels, weights, n_classes=len(NSV_CLASSES))
+    return {"weights": list(weights) if isinstance(weights, tuple) else weights, "loss_scale": scale}
 
 
 def run_dir(args, seed):
@@ -196,21 +235,24 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
     n_classes = len(NSV_CLASSES) if multiclass else 1
     fit_tr = nsv_labels(sym_tr) if multiclass else y_tr
     fit_ev = nsv_labels(sym_ev) if multiclass else y_ev
-    loss = make_loss(args, ecg_model)
     train_masks = [m[0] for m in cv.fold_masks(rec_tr, train.CV_FOLDS)]
     held_out_masks = [m[1] for m in cv.fold_masks(rec_ev, train.CV_FOLDS)]
 
     # Per fold: raw model outputs on the held-out fold ((n,) binary, (n, 3) N/S/V), and the fold model's
     # DS2 abnormal scores (diagnostic).
-    best_epochs, oof_float, oof_int8, test_int8_by_fold = [], [], [], []
+    best_epochs, oof_float, oof_int8, test_int8_by_fold, fold_losses = [], [], [], [], []
+    stop_on = monitor_loss(args, ecg_model)
     for k, (tr, ho) in enumerate(zip(train_masks, held_out_masks)):
         print(f"\n=== seed {seed}, fold {k}: hold out {train.CV_FOLDS[k]} ===", flush=True)
         tf.keras.backend.clear_session()
         tf.keras.utils.set_random_seed(seed)
         m = train.build_model(args.variant, spec_shape, tf, ecg_model, n_classes=n_classes)
+        weights = loss_weights(args, fit_tr[tr])
+        fold_losses.append(loss_record(args, fit_tr[tr], weights))
         best_epochs.append(train.fit_model(
             m, tf, ecg_model, [X_tr_spec[tr], X_tr_rr[tr]], fit_tr[tr],
-            ([X_ev_spec[ho], X_ev_rr[ho]], fit_ev[ho]), LEARNING_RATE, args.epochs, args.batch_size, loss=loss,
+            ([X_ev_spec[ho], X_ev_rr[ho]], fit_ev[ho]), LEARNING_RATE, args.epochs, args.batch_size,
+            loss=make_loss(args, ecg_model, weights), monitor_loss=stop_on,
         ))
         tflite_path = os.path.join(out_dir, "folds", f"fold{k}_int8.tflite")
         with open(tflite_path, "wb") as f:
@@ -234,7 +276,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
 
     folds = [
         fold_report(k, train.CV_FOLDS[k], best_epochs[k], y_ev[ho], sym_ev[ho], evaluate.abnormal_score(oof_int8[k]),
-                    y_te, test_int8_by_fold[k], threshold, evaluate)
+                    y_te, test_int8_by_fold[k], threshold, evaluate) | {"loss": fold_losses[k]}
         for k, ho in enumerate(held_out_masks)
     ]
 
@@ -243,8 +285,10 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
     tf.keras.backend.clear_session()
     tf.keras.utils.set_random_seed(seed)
     model = train.build_model(args.variant, spec_shape, tf, ecg_model, n_classes=n_classes)
+    final_weights = loss_weights(args, fit_tr)
+    final_loss = loss_record(args, fit_tr, final_weights)
     train.fit_model(model, tf, ecg_model, [X_tr_spec, X_tr_rr], fit_tr, None, LEARNING_RATE, n_epochs,
-                    args.batch_size, loss=loss)
+                    args.batch_size, loss=make_loss(args, ecg_model, final_weights))
     model.save(os.path.join(out_dir, "ecg_multiscale_model.keras"))
     tflite_bytes = export.convert_to_int8_tflite(model, X_tr_spec, X_tr_rr,
                                                  num_samples=args.calib_samples, seed=seed)
@@ -259,7 +303,7 @@ def run_seed(args, seed, ds1_eval, ds2, tf, ecg_model, data, evaluate, export, c
                           probs={"float": probs_float, "int8": probs_int8},
                           threshold=threshold, sweep=sweep, float_threshold=float_threshold, float_sweep=float_sweep)
     write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, test_float, test_int8,
-                  tflite_bytes, tflite_path, evaluate, test_class_probs=test_probs if multiclass else None)
+                  tflite_bytes, tflite_path, evaluate, final_loss, test_class_probs=test_probs if multiclass else None)
 
 
 def _squeeze(probs):
@@ -269,7 +313,8 @@ def _squeeze(probs):
 
 
 def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, test_float, test_int8,
-                  tflite_bytes, tflite_path, evaluate, test_class_probs=None):
+                  tflite_bytes, tflite_path, evaluate, final_loss, test_class_probs=None):
+    """`final_loss`: loss_record of the final model's loss; each fold's is in its folds.json entry."""
     X_te_spec, X_te_rr, y_te, rec_te, sym_te = ds2
     threshold, float_threshold, sweep = oof.threshold, oof.float_threshold, oof.sweep
     float_overall, float_per_record = evaluate.evaluate_predictions(y_te, test_float, rec_te, threshold)
@@ -295,13 +340,14 @@ def write_outputs(args, seed, out_dir, n_epochs, best_epochs, folds, oof, ds2, t
         }, f, indent=2)
     with open(os.path.join(out_dir, "folds.json"), "w") as f:
         json.dump({"best_epochs": best_epochs, "final_epochs": n_epochs, "threshold": threshold,
-                   "folds": folds}, f, indent=2)
+                   "early_stopping_monitor": early_stopping_monitor(args), "folds": folds}, f, indent=2)
     with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump({
             "variant": args.variant,
             **run_config(args),
-            "loss": {"focal_gamma": FOCAL_GAMMA, "weights": LOSS_WEIGHTS[(args.classes, args.loss_weights)],
-                     "classes": list(NSV_CLASSES) if args.classes == "nsv" else ["N", "abnormal"]},
+            "loss": {"focal_gamma": FOCAL_GAMMA, **final_loss,
+                     "classes": list(NSV_CLASSES) if args.classes == "nsv" else ["N", "abnormal"],
+                     "early_stopping_monitor": early_stopping_monitor(args)},
             "calib_samples": args.calib_samples,
             "final_epochs": n_epochs,
             "model_size_kb": model_size_kb,

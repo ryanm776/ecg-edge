@@ -226,7 +226,7 @@ def test_comparison_rows_use_each_models_own_val_sweep():
         assert row_["seed"] == 43
 
 
-def _fake_fit_env(val_loss):
+def _fake_fit_env(val_loss, history=None):
     from types import SimpleNamespace
 
     calls = {}
@@ -237,7 +237,7 @@ def _fake_fit_env(val_loss):
 
         def fit(self, **kw):
             calls["fit"] = kw
-            return SimpleNamespace(history={"val_loss": val_loss})
+            return SimpleNamespace(history=history or {"val_loss": val_loss})
 
     keras = SimpleNamespace(
         optimizers=SimpleNamespace(Adam=lambda learning_rate: ("adam", learning_rate)),
@@ -255,8 +255,47 @@ def test_fit_model_returns_best_epoch_with_early_stopping():
     assert best == 2
     assert calls["compile"]["loss"] == ("focal", 2.0, 0.25)
     (_, es), = calls["fit"]["callbacks"]
-    assert es == {"monitor": "val_loss", "patience": 12, "restore_best_weights": True}
+    assert es == {"monitor": "val_loss", "mode": "min", "patience": 12, "restore_best_weights": True}
     assert calls["fit"]["epochs"] == 100 and calls["fit"]["validation_data"] == ("xv", "yv")
+
+
+def test_fit_model_early_stops_on_a_given_monitor_loss(monkeypatch):
+    history = {"val_loss": [0.5, 0.3, 0.4], train.MONITOR_KEY: [0.9, 0.8, 0.7]}
+    model, tf, ecg_model, calls = _fake_fit_env(None, history)
+    monkeypatch.setattr(train, "val_loss_monitor", lambda tf, loss_fn, x, y, batch_size: ("monitor", loss_fn, x, y))
+
+    best = train.fit_model(model, tf, ecg_model, "x", "y", ("xv", "yv"), lr=0.001, epochs=100, batch_size=64,
+                           loss="weighted", monitor_loss="unweighted")
+
+    assert best == 3  # the monitor's best epoch, not val_loss's (2)
+    assert calls["compile"]["loss"] == "weighted"
+    monitor, (_, es) = calls["fit"]["callbacks"]  # the monitor logs its value before EarlyStopping reads it
+    assert monitor == ("monitor", "unweighted", "xv", "yv")
+    assert es == {"monitor": train.MONITOR_KEY, "mode": "min", "patience": 12, "restore_best_weights": True}
+
+
+def test_val_loss_monitor_reproduces_val_loss_for_the_training_loss():
+    import numpy as np
+    import tensorflow as tf
+
+    from ecg.model import categorical_focal_loss
+
+    rng = np.random.default_rng(0)
+    x, y = rng.normal(size=(200, 6)).astype(np.float32), rng.integers(0, 3, 200)
+    xv, yv = rng.normal(size=(90, 6)).astype(np.float32), rng.integers(0, 3, 90)
+    tf.keras.utils.set_random_seed(0)
+    model = tf.keras.Sequential([tf.keras.Input((6,)), tf.keras.layers.Dense(8, kernel_regularizer="l2"),
+                                 tf.keras.layers.Dense(3, activation="softmax", kernel_regularizer="l2")])
+    loss = categorical_focal_loss(gamma=2.0)
+    model.compile(optimizer="adam", loss=loss)
+
+    history = model.fit(x, y, validation_data=(xv, yv), epochs=3, batch_size=32, verbose=0,
+                        callbacks=[train.val_loss_monitor(tf, loss, xv, yv, 32)])
+
+    # val_loss includes the L2 penalty, and so does the monitor; History records the monitor too.
+    np.testing.assert_allclose(history.history[train.MONITOR_KEY], history.history["val_loss"], rtol=1e-5)
+    l2 = sum(float(r) for r in model.losses)
+    assert l2 > 100 * 1e-5 * history.history["val_loss"][-1]  # the penalty is far above the tolerance
 
 
 def test_fit_model_without_validation_trains_all_epochs():

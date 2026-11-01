@@ -115,23 +115,48 @@ def build_model(variant, spec_shape, tf, ecg_model, n_classes=1):
     return ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras, n_classes=n_classes)
 
 
-def fit_model(m, tf, ecg_model, x_train, y_train, validation_data, lr, epochs, batch_size, loss=None):
+MONITOR_KEY = "val_monitor_loss"
+
+
+def val_loss_monitor(tf, loss_fn, x_val, y_val, batch_size):
+    """Callback that logs `loss_fn` on the validation data plus the model's regularization losses as
+    MONITOR_KEY at each epoch end: the quantity Keras' val_loss would be with `loss_fn` as the training loss.
+    It must come before any callback that reads MONITOR_KEY."""
+
+    class ValLossMonitor(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            pred = self.model.predict(x_val, batch_size=batch_size, verbose=0)
+            value = float(loss_fn(y_val, pred)) + sum(float(r) for r in self.model.losses)
+            if logs is not None:
+                logs[MONITOR_KEY] = value
+
+    return ValLossMonitor()
+
+
+def fit_model(m, tf, ecg_model, x_train, y_train, validation_data, lr, epochs, batch_size, loss=None,
+              monitor_loss=None):
     """Compile and fit; `loss=None` is the binary focal loss (gamma 2, alpha 0.25). With `validation_data`,
     early-stop on val_loss (best weights restored) and return the best epoch (1-based); without it, train
     all `epochs` and return `epochs`.
+
+    `monitor_loss`: early-stop on this loss over the validation data (plus the regularization losses, as in
+    val_loss) instead of on val_loss, e.g. an unweighted loss when the training loss is class-weighted.
     """
     if loss is None:
         loss = ecg_model.focal_loss(gamma=2.0, alpha=0.25)
     m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr), loss=loss, metrics=["accuracy"])
-    callbacks = []
+    callbacks, monitor = [], "val_loss"
     if validation_data is not None:
+        if monitor_loss is not None:
+            callbacks.append(val_loss_monitor(tf, monitor_loss, *validation_data, batch_size))
+            monitor = MONITOR_KEY
         callbacks.append(tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=EARLY_STOP_PATIENCE, restore_best_weights=True))
+            monitor=monitor, mode="min", patience=EARLY_STOP_PATIENCE, restore_best_weights=True))
     history = m.fit(x=x_train, y=y_train, validation_data=validation_data, epochs=epochs,
                     batch_size=batch_size, callbacks=callbacks)
     if validation_data is None:
         return epochs
-    return int(np.argmin(history.history["val_loss"])) + 1
+    return int(np.argmin(history.history[monitor])) + 1
 
 
 def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, preds, threshold, float_threshold,

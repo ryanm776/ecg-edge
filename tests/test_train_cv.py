@@ -153,6 +153,38 @@ def test_train_cv_caps_normal_beats_in_training_only(monkeypatch, tmp_path):
         assert oof["symbols"][oof["record_ids"] == rec].tolist() == SYMBOLS.tolist()
 
 
+def test_train_cv_balanced_records_per_fold_weights_and_monitor(monkeypatch, tmp_path):
+    from ecg import cv, data
+    from ecg.features import balanced_class_weights, nsv_labels
+
+    monkeypatch.setattr(data, "build_dataset", _fake_build_dataset)
+    monkeypatch.setattr(sys, "argv", ["train_cv", "--epochs", "1", "--seeds", "42", "--calib-samples", "10",
+                                      "--artifacts-dir", str(tmp_path), "--classes", "nsv", "--loss-weights", "balanced"])
+    fits = []
+    real_fit = train.fit_model
+    monkeypatch.setattr(train, "fit_model", lambda *a, **kw: fits.append(kw) or real_fit(*a, **kw))
+
+    train_cv.main()
+
+    run = tmp_path / "cv" / "bn_folded_seed42"
+    folds = json.loads((run / "folds.json").read_text())
+    metrics = json.loads((run / "metrics.json").read_text())
+    # Each fold's weights are balanced on that fold's own training labels; the final model's on all of DS1.
+    _, _, _, rec_tr, sym_tr = _fake_build_dataset(train.DS1_RECORDS, "data", augment=True, return_symbols=True)
+    labels = nsv_labels(sym_tr)
+    for f, (tr, _) in zip(folds["folds"], cv.fold_masks(rec_tr, train.CV_FOLDS)):
+        assert f["loss"]["weights"] == pytest.approx(balanced_class_weights(labels[tr]).tolist())
+        assert f["loss"]["loss_scale"] == pytest.approx(1.0)
+    assert metrics["loss"]["weights"] == pytest.approx(balanced_class_weights(labels).tolist())
+    assert metrics["loss"]["loss_scale"] == pytest.approx(1.0)
+    assert folds["early_stopping_monitor"] == metrics["loss"]["early_stopping_monitor"] == "unweighted_val_loss"
+    # Every fold model early-stops on a monitor loss; the final model has no validation data and none.
+    assert [kw["monitor_loss"] is not None for kw in fits[:-1]] == [True] * len(train.CV_FOLDS)
+    assert fits[-1].get("monitor_loss") is None
+    assert (metrics["classes"], metrics["loss_weights"]) == ("nsv", "balanced")
+    assert set(pd.read_csv(tmp_path / "cv_comparison_seeds.csv")["variant"]) == {"bn_folded+nsv+balanced"}
+
+
 def _write_run(artifacts_dir, name, metrics):
     run = artifacts_dir / "cv" / name
     run.mkdir(parents=True)
@@ -180,13 +212,22 @@ def test_train_cv_refuses_to_mix_configurations_in_one_dir(monkeypatch, tmp_path
         _parse(monkeypatch, "--artifacts-dir", str(nsv_dir), "--seeds", "43", "--classes", "nsv")
 
 
-@pytest.mark.parametrize("classes, weights, label, loss", [
-    ("binary", "matched", "bn_folded", ("focal", 2.0, 0.25)),
-    ("binary", "none", "bn_folded+unweighted", ("focal", 2.0, None)),
-    ("nsv", "matched", "bn_folded+nsv", ("categorical", 2.0, (0.75, 0.25, 0.25))),
-    ("nsv", "none", "bn_folded+nsv+unweighted", ("categorical", 2.0, None)),
+# Training labels for the loss tests: 6 N, 1 S, 3 V (binary: 6 normal, 4 abnormal).
+NSV_FIT = np.array([0] * 6 + [1] + [2] * 3)
+BINARY_FIT = (NSV_FIT > 0).astype(int)
+
+
+@pytest.mark.parametrize("classes, weights, label, loss, monitor, scale", [
+    ("binary", "matched", "bn_folded", ("focal", 2.0, 0.25), None, (0.75 * 6 + 0.25 * 4) / 10),
+    ("binary", "none", "bn_folded+unweighted", ("focal", 2.0, None), None, 1.0),
+    ("nsv", "matched", "bn_folded+nsv", ("categorical", 2.0, (0.75, 0.25, 0.25)), None, (0.75 * 6 + 0.25 * 4) / 10),
+    ("nsv", "none", "bn_folded+nsv+unweighted", ("categorical", 2.0, None), None, 1.0),
+    # Balanced: w_c = 10 / (3 * n_c), early stopping on the unweighted loss.
+    ("nsv", "balanced", "bn_folded+nsv+balanced", ("categorical", 2.0, (10 / 18, 10 / 3, 10 / 9)),
+     ("categorical", 2.0, None), 1.0),
 ])
-def test_train_cv_loss_and_label_per_configuration(monkeypatch, tmp_path, classes, weights, label, loss):
+def test_train_cv_loss_and_label_per_configuration(monkeypatch, tmp_path, classes, weights, label, loss, monitor,
+                                                   scale):
     from types import SimpleNamespace
 
     ecg_model = SimpleNamespace(
@@ -194,9 +235,21 @@ def test_train_cv_loss_and_label_per_configuration(monkeypatch, tmp_path, classe
         categorical_focal_loss=lambda gamma, class_weights: ("categorical", gamma, class_weights),
     )
     args = _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--classes", classes, "--loss-weights", weights)
+    fit = NSV_FIT if classes == "nsv" else BINARY_FIT
 
+    w = train_cv.loss_weights(args, fit)
     assert train_cv.row_label(args) == label
-    assert train_cv.make_loss(args, ecg_model) == loss
+    built = train_cv.make_loss(args, ecg_model, w)
+    assert built[:2] == loss[:2]
+    assert built[2] == (None if loss[2] is None else pytest.approx(loss[2]))
+    assert train_cv.monitor_loss(args, ecg_model) == monitor
+    assert train_cv.early_stopping_monitor(args) == ("val_loss" if monitor is None else "unweighted_val_loss")
+    assert train_cv.loss_record(args, fit, w)["loss_scale"] == pytest.approx(scale)
+
+
+def test_train_cv_balanced_weights_need_nsv(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--loss-weights", "balanced")
 
 
 def test_train_cv_nsv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
@@ -212,7 +265,9 @@ def test_train_cv_nsv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     run = tmp_path / "cv" / "bn_folded_seed42"
     metrics = json.loads((run / "metrics.json").read_text())
     assert (metrics["classes"], metrics["loss_weights"]) == ("nsv", "matched")
-    assert metrics["loss"] == {"focal_gamma": 2.0, "weights": [0.75, 0.25, 0.25], "classes": ["N", "S", "V"]}
+    # The synthetic training view is 4 N, 1 S, 1 V per record, so matched's loss scale is (0.75 * 4 + 0.25 * 2) / 6.
+    assert metrics["loss"] == {"focal_gamma": 2.0, "weights": [0.75, 0.25, 0.25], "classes": ["N", "S", "V"],
+                               "loss_scale": pytest.approx(3.5 / 6), "early_stopping_monitor": "val_loss"}
 
     # Saved OOF scores are 1 - P(N) of the saved probabilities, and the threshold is chosen on them.
     oof = np.load(run / "oof_predictions.npz")
