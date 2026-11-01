@@ -10,11 +10,13 @@ from ecg.features import (
     aami_class,
     aami_class_metrics,
     apply_rr_normalizer,
+    balanced_class_weights,
     beat_annotation_mask,
     compute_rr_timing_features,
     compute_spectrogram,
     extract_beats_from_record,
     fit_rr_normalizer,
+    loss_scale,
     nsv_labels,
     rr_quantile_ratio,
     sv_confusion,
@@ -80,6 +82,27 @@ def test_sv_confusion_counts_s_v_mixups_only():
 def test_nsv_labels_reject_symbols_outside_n_s_v():
     with pytest.raises(ValueError, match="F"):
         nsv_labels(np.array(["N", "F", "V"], dtype=object))
+
+
+def test_balanced_class_weights_equalize_class_totals_at_unit_mean():
+    labels = np.repeat([0, 1, 2], [11400, 555, 3179])  # fold 0's training view
+    counts = np.bincount(labels)
+
+    w = balanced_class_weights(labels)
+
+    totals = w * counts
+    # Each class carries the same total weight, i.e. w is proportional to 1 / frequency.
+    assert totals == pytest.approx(np.full(3, len(labels) / 3))
+    assert loss_scale(labels, w) == pytest.approx(1.0)
+    assert loss_scale(labels, None) == 1.0
+    # Matched weights on the same view: the frequency-weighted mean of N 0.75 / S 0.25 / V 0.25.
+    assert loss_scale(labels, (0.75, 0.25, 0.25)) == pytest.approx((0.75 * 11400 + 0.25 * (555 + 3179)) / len(labels))
+
+
+@pytest.mark.parametrize("labels", [[0, 0, 2, 2], [0, 1, 1, 3]])
+def test_balanced_class_weights_reject_a_missing_or_unknown_class(labels):
+    with pytest.raises(ValueError):
+        balanced_class_weights(np.array(labels))
 
 
 def test_aami_class_metrics_needs_exactly_one_prediction_kind():
@@ -196,6 +219,26 @@ def test_extract_beats_returns_symbols_aligned_with_labels_and_augmentation():
     assert syms == ["V", "V", "N", "N", "A", "A"]  # each beat plus its jitter duplicate
     assert y == [1, 1, 0, 0, 1, 1]
     assert len(record_ids) == len(syms)
+
+
+def test_augmentation_doubles_every_class_under_the_normal_cap():
+    # Balanced weights are computed on the augmented training view; this keeps them equal to the
+    # unaugmented view's.
+    fs = 360
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(30 * fs) / fs)
+    samples = np.arange(200, 30 * fs - 200, 300)
+    symbols = (["N", "N", "N", "V", "N", "A"] * len(samples))[:len(samples)]
+
+    def class_counts(augment):
+        *_, syms = extract_beats_from_record(signal, fs, samples, symbols, "r", max_normal=10, augment=augment,
+                                             rng=np.random.default_rng(0))
+        return np.bincount(nsv_labels(np.array(syms, dtype=object)), minlength=3)
+
+    plain, augmented = class_counts(False), class_counts(True)
+    assert plain[0] == 10 and plain[1] > 0 and plain[2] > 0  # the cap binds
+    np.testing.assert_array_equal(augmented, 2 * plain)
+    assert balanced_class_weights(np.repeat([0, 1, 2], augmented)) == pytest.approx(
+        balanced_class_weights(np.repeat([0, 1, 2], plain)))
 
 
 def _record_with_nonbeat_annotations():

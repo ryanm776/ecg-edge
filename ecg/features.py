@@ -69,6 +69,26 @@ def nsv_labels(symbols):
     return np.array([NSV_CLASSES.index(c) for c in classes], dtype=np.int32)
 
 
+def balanced_class_weights(labels, n_classes=len(NSV_CLASSES)):
+    """Inverse-frequency class weights over integer `labels`, normalized so the frequency-weighted mean is 1.
+
+    w_c = 1 / (n_classes * f_c), so every class contributes the same total weight and the data loss keeps the
+    scale of an unweighted loss (Stage 2 step 2b). Raises if a class has no beats.
+    """
+    counts = np.bincount(np.asarray(labels), minlength=n_classes)
+    if len(counts) != n_classes or np.any(counts == 0):
+        raise ValueError(f"Expected beats of each of {n_classes} classes, got counts {counts.tolist()}")
+    return counts.sum() / (n_classes * counts)
+
+
+def loss_scale(labels, class_weights, n_classes=len(NSV_CLASSES)):
+    """Frequency-weighted mean class weight over integer `labels`: 1 for unweighted and balanced weights."""
+    if class_weights is None:
+        return 1.0
+    freq = np.bincount(np.asarray(labels), minlength=n_classes) / len(labels)
+    return float(freq @ np.asarray(class_weights, dtype=float))
+
+
 def aami_class_metrics(symbols, abnormal_pred=None, pred_classes=None):
     """AAMI sensitivity (Se) and positive predictivity (+P) for S and V: {cls: (n, se, pp)}.
 
