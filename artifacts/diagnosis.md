@@ -1,6 +1,6 @@
 # ECG classifier: investigation and experiment log
 
-> **Current status:** Stage 2 is in progress. The latest results are in the last section, "Stage 2 step 2b results: balanced class weights": no weighting wins, so nsv_matched (N/S/V, weights N 0.75 / S 0.25 / V 0.25) carries forward. Step 3 (R-R representation) is designed in "Step 3 design" at the end of that section, before any step 3 run. The remaining steps are in "Stage 2 plan". No model has been exported to firmware since the old-split baseline.
+> **Current status:** Stage 2 is in progress. The latest results are in the last section, "Stage 2 step 3a results: 30-interval R-R lookback": no gain, so nsv_matched (N/S/V, weights N 0.75 / S 0.25 / V 0.25, 10-interval lookback) still carries forward, and step 3b (`--normalize-rr`) builds on it. Step 3 was designed before any step 3 run, in "Step 3 design" at the end of "Stage 2 step 2b results". The remaining steps are in "Stage 2 plan". No model has been exported to firmware since the old-split baseline.
 
 ## Contents
 
@@ -16,6 +16,7 @@ Investigations in the order they were run, each with its outcome:
 - **Stage 2 step 1b results: MLII by signal name:** record 114's swapped leads are fixed, with no pooled gain beyond the seed spread. The S gap is still open.
 - **Stage 2 step 2a results: binary vs. N/S/V:** no structural multiclass benefit; N/S/V matched shows no loss against binary and carries forward for AAMI comparability and a separate S weight.
 - **Stage 2 step 2b results: balanced class weights:** no weighting wins on S PR-AUC. Balanced weights fail the V guard and mainly shift scores up rather than ranking S better. nsv_matched carries forward; step 3 is designed with 5 seeds.
+- **Stage 2 step 3a results: 30-interval R-R lookback:** no gain beyond the seed spread on any decision metric (S PR-AUC −0.002, 5 seeds). Record 209, the motivating case, ranks S worse. 3b builds on nsv_matched.
 
 > **Old split.** "Float → INT8 gap" and "Validation/test mismatch" use the old hand-picked train/val/test split, as does every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …). Everything from "de Chazal split results" on uses the de Chazal split; those results are in `artifacts/dechazal/` (see README.md, "Data split").
 
@@ -979,3 +980,54 @@ Fixed before any step 3 run.
 - the step 3 per-record S AUCs
 
 The data work's success test would then use the step 3 reference with seeds 42–46.
+
+## Stage 2 step 3a results: 30-interval R-R lookback
+
+nsv_rr30 (`train_cv.py --classes nsv --rr-lookback 30`, in `stage2/step3a_rr30`) and the nsv_matched reference (`stage2/step3_nsv_matched`: the 2a seeds 42–44 plus new seeds 45 and 46) were trained with seeds 42–46, as fixed in "Step 3 design". Every run has the configuration it should: matched weights N 0.75 / S 0.25 / V 0.25, early stopping on val_loss, lookback 10 or 30, no normalization. The OOF pool is the same 48,596 beats in every run.
+
+- **The longer window does change the input.** On record 209, the median `rr_ratio` of the 383 S beats falls from 0.895 (10 intervals) to 0.801 (30 intervals). Its N beats stay at 1.006 / 1.011.
+  - Stage 1's 0.950 → 0.825 was measured on the pre-fix, all-annotation R-R.
+
+**Decision metrics: pooled OOF, INT8.** Seeds 42 / 43 / 44 / 45 / 46, then mean ± std. Table: `stage2/step3a/oof_comparison.md`.
+
+| Metric | nsv_matched | nsv_rr30 | Gain | Spread | Exceeds / separated |
+|---|---|---|---|---|---|
+| **S PR-AUC (primary)** | 0.117 / 0.087 / 0.168 / 0.168 / 0.191 = 0.146 ± 0.043 | 0.195 / 0.151 / 0.114 / 0.179 / 0.079 = 0.144 ± 0.047 | −0.002 | 0.047 | no / no |
+| S ROC-AUC | 0.874 / 0.828 / 0.883 / 0.821 / 0.863 = 0.854 ± 0.028 | 0.852 / 0.786 / 0.822 / 0.860 / 0.768 = 0.817 ± 0.040 | −0.036 | 0.040 | no / no |
+| V PR-AUC (guard) | 0.904 / 0.899 / 0.934 / 0.903 / 0.884 = 0.905 ± 0.018 | 0.876 / 0.912 / 0.903 / 0.919 / 0.887 = 0.899 ± 0.018 | −0.005 | 0.018 | no / no |
+| V ROC-AUC | 0.973 ± 0.006 | 0.972 ± 0.006 | −0.002 | 0.006 | no / no |
+
+- **No gain on S.** The S PR-AUC change is −0.002 against a spread of 0.047. The V guard holds, at −0.005 against 0.018.
+- The float rows give the same verdicts. INT8 − float: the largest per-seed gap of any decision metric is 0.007 (nsv_matched, S PR-AUC).
+- Per seed, the S PR-AUC change goes both ways: rr30 is higher for seeds 42, 43 and 45, and lower for 44 and 46.
+- Seeds 45 and 46 raise the reference's S PR-AUC from 0.124 ± 0.041 (seeds 42–44) to 0.146 ± 0.043.
+- **Decision (rule pre-declared in "Step 3 design"): 3a has no winner.** 3b therefore builds on nsv_matched (lookback 10) and is compared with the same 5-seed reference.
+
+**Descriptive (never decisive):**
+- **209, the motivating record, ranks S worse with the longer window.** S vs. own-N ROC-AUC is 0.876 / 0.698 / 0.598 / 0.780 / 0.891 under rr30, against 0.975 / 0.931 / 0.917 / 0.732 / 0.947 for nsv_matched. 209 is in fold 0, so these scores come from fold models that never saw 209.
+  - So the separation the 30-interval ratio adds to 209's S beats doesn't carry into the CNN's ranking, even though the ratio alone separates them better (Stage 1, step 2).
+- **Other records, S ROC-AUC, rr30 against nsv_matched:**
+  - 220: 0.967–0.996 against 0.948–0.982.
+  - 118: 0.790–0.991 against 0.384–0.984. Its worst seed improves.
+  - 124: 0.532–0.713 against 0.400–0.754, near chance in both.
+  - 207 and 223: 0.903–0.997 in both.
+- S vs. N ROC-AUC on P(S): 0.779 ± 0.049 (rr30), against 0.814 ± 0.062.
+- **At each run's selected threshold:**
+  - Thresholds: rr30 0.45 / 0.50 / 0.60 / 0.50 / 0.65, nsv_matched 0.65 / 0.60 / 0.50 / 0.55 / 0.55.
+  - FN side: S recall (flagged abnormal) 0.270 ± 0.158 against 0.256 ± 0.133; V recall 0.864 ± 0.021 against 0.865 ± 0.032.
+  - FP side: N false-positive rate 0.015 ± 0.006 against 0.014 ± 0.005.
+  - S ↔ V mix-ups: S called V 70.8 ± 49.4 against 83.8 ± 53.2; V called S 168.4 ± 85.1 against 260.4 ± 74.4.
+- **At target recall 0.90:**
+  - FN side: S flagged 0.658 ± 0.032 (nsv_matched 0.680 ± 0.039), S under the call rule 0.445 ± 0.028 (0.462 ± 0.036), V under the call rule 0.878 ± 0.015 (0.846 ± 0.006).
+  - FP side: 8,144 ± 2,633 N false positives (5,777 ± 2,988), precision 0.340 ± 0.075 (0.438 ± 0.129), +P_S 0.101 ± 0.051 (0.141 ± 0.093), +P_V 0.457 ± 0.135 (0.538 ± 0.079).
+  - At target recall 0.95: 18,682 ± 3,509 FPs (14,413 ± 4,759), +P_S 0.045 ± 0.012 (0.063 ± 0.026).
+
+**DS2, final models (INT8, at each seed's pooled-OOF threshold; reported, never used for a choice):**
+
+| Cell | PR-AUC | F1 | FP | FN | Se_S | +P_S | Se_V | +P_V |
+|---|---|---|---|---|---|---|---|---|
+| nsv_matched (seeds 42–46) | 0.763 ± 0.045 | 0.669 ± 0.048 | 1,882 ± 1,265 | 1,607 ± 382 | 0.165 ± 0.112 | 0.292 ± 0.063 | 0.887 ± 0.076 | 0.737 ± 0.190 |
+| nsv_rr30 | 0.777 ± 0.059 | 0.734 ± 0.025 | 872 ± 782 | 1,596 ± 657 | 0.092 ± 0.036 | 0.381 ± 0.154 | 0.886 ± 0.068 | 0.796 ± 0.178 |
+
+- DS2 S beats called V: nsv_rr30 337.6 ± 507.7, nsv_matched 161.8 ± 92.5.
+- Final epochs: rr30 15 / 8 / 20 / 13 / 9, nsv_matched 12 / 15 / 19 / 10 / 16. The unresolved final-model procedure applies, as in every cell.
