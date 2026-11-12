@@ -555,7 +555,7 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
   - Record 124's junctional (`J`) beats: neither cue separates them.
 
 **Parked:**
-- Pan-Tompkins R-peaks
+- Pan-Tompkins R-peaks. Also check what the detector emits across record 207's flutter episodes (see "Stage 2 item 1").
 - DS2 sensitivity analysis
 - pruning
 - firmware header regeneration
@@ -1152,3 +1152,71 @@ Fixed on 2026-11-02, after the step 3b results and before any further run. This 
 - the final-model procedure ("Required before deployment")
 - one DS2 evaluation of the result
 - firmware: `rr_norm.h`, regenerated `model_data.h` / `threshold.h`, and on-device testing
+
+## Stage 2 item 1: record 207 flutter-episode R-R fix
+
+**The bug** (found in the 3b review, above). Inside each of 207's six ventricular flutter episodes the heart is active throughout, with a flutter wave every 0.28–0.34 s. An interval from the last beat before an episode to the first beat after it measures how long the episode lasted, not a cardiac cycle.
+
+| Episode | Duration | Flutter waves (`!`) | Median spacing | Rate | Longest gap |
+|---|---|---|---|---|---|
+| 40.7–51.0 s | 10.2 s | 28 | 0.34 s | 179/min | 0.45 s |
+| 54.8–60.4 s | 5.6 s | 16 | 0.32 s | 189/min | 0.49 s |
+| 242.1–246.4 s | 4.3 s | 12 | 0.34 s | 176/min | 0.38 s |
+| 247.9–261.4 s | 13.6 s | 40 | 0.31 s | 191/min | 0.42 s |
+| 269.5–280.9 s | 11.4 s | 36 | 0.30 s | 200/min | 0.42 s |
+| 1540.8–1638.7 s | 97.9 s | 340 | 0.28 s | 214/min | 0.52 s |
+
+**The rule** (`features.EPISODE_SYMBOLS`, `features.valid_rr_mask`). In beat-only R-R, an interval with any `[`, `]` or `!` annotation between its two beats is invalid.
+- A beat is extracted only if both of its intervals are valid. So the beats on either side of an episode are dropped, as at the two ends of a record.
+- After an episode, `local_mean_rr` averages only the intervals since the episode, the same warm-up as at a record start.
+- The rule keys on annotations, not on interval length. 232's pauses (up to 5.9 s) and the long intervals in 201, 208 and 219 have no such annotation inside them and are kept.
+- `rr_from_all_annotations=True` (pre-fix reproduction) is unchanged.
+- This is the rule of WFDB `bxb`, the reference implementation of the AAMI EC38/EC57 beat-by-beat statistics (`bxb.c`, revised 27 April 2020). Annotations between VFON (`[`) and VFOFF (`]`) are "read and ignored", and "T-TT is not a valid RR interval if [...] a period of VF or shutdown occurs between TT and T".
+
+**Effect on MIT-BIH.** Every DS1 and DS2 record except 207 gives identical spectrograms and R-R features. In 207, extractable beats go from 1,858 to 1,847:
+- **11 beats dropped:** 6 L and 4 R (N), 1 E (V), no S. Each had a `pre_rr` or `post_rr` of 5.8–100.0 s. The R at 247.6 s lies between two episodes 1.5 s apart, so both of its intervals are invalid.
+- **34 beats keep `pre_rr`/`post_rr` and get corrected `local_mean_rr`/`rr_ratio`:** 10 V, 14 L, 9 E, 1 R. For example, the E run after the 98 s episode had `local_mean_rr` ≈ 11.3 s; it is now 1.5–2.4 s.
+- The largest `pre_rr` in 207 goes from 100.02 s to 2.51 s.
+- 207 is in CV fold 1. DS2 is unaffected.
+
+**Alternative considered: flutter waves as R-R neighbors.** `!` would be treated like F and Q: a neighbor for R-R, never extracted. Every interval would then be a real cycle from one activation to the next (0.6–2.6 s for the boundary beats), and the 11 beats would be kept. Not chosen, because:
+- For about 10 beats after each episode, `local_mean_rr` would average flutter cycles of about 0.3 s, giving normal beats an `rr_ratio` of about 3 (up to 4.45). The ratio exists to compare a beat's timing with the conducted rhythm. An S beat right after an episode would look late instead of early.
+- It works only for organized flutter. Ventricular fibrillation has no discrete waves to annotate. A database that marks episodes but not flutter waves would also keep the episode-spanning interval. Either way, the reset rule would be needed anyway.
+- The reset is the mechanism the device needs anyway after lead-off, noise or detector dropout, and item 2 needs the same warm-up.
+- The cost of the chosen rule: the escape beat at 1640.5 s is dropped, although its 2.57 s interval from the last flutter wave is informative (escape beats are late).
+
+**Differences from AAMI EC57 scoring:**
+- `bxb` still scores the beats beside an episode; only their R-R is invalid. These 11 beats have no valid features, so our metrics leave them out.
+- `bxb` starts the comparison 5 minutes into each record by default (the "learning period"). Our metrics score whole records. This matters only for EC57-compliant comparisons with the literature, and it is not changed.
+
+**Runs before item 1 used the old features.** Every run before this fix, including `step3b_rr_norm` and all earlier Stage 2 runs, used R-R intervals that span 207's episodes. No configuration field records this; the commit that introduces `EPISODE_SYMBOLS` is the boundary.
+
+**Out of scope: flutter/fibrillation detection.** It is a rhythm-level problem, not a beat class. DS1 and DS2 have one patient with it (207: 6 episodes, 472 flutter waves), and DS2 has none. A detector would need its own data, such as PhysioNet's CU Ventricular Tachyarrhythmia Database and MIT-BIH Malignant Ventricular Ectopy Database.
+
+**Descriptive check: the beat model on flutter waves.**
+- Models: the fold-1 INT8 models of `step3b_rr_norm` (207 held out, pre-fix features), with fold 1's R-R statistics and each seed's pooled-OOF threshold.
+- Inputs: windows centred on each of 207's 472 flutter waves. R-R as if a detector fired on every wave and beat (beats and `!` as neighbors, no reset): median `pre_rr` 0.29 s, `rr_ratio` 0.98.
+
+| Seed | Threshold | Flutter waves called abnormal | Called N / S / V | Median abnormal score | 207 N beats flagged | 207 V beats flagged |
+|---|---|---|---|---|---|---|
+| 42 | 0.50 | 91.9% | 38 / 14 / 420 | 0.836 | 0.7% | 62.7% |
+| 43 | 0.50 | 95.6% | 21 / 8 / 443 | 0.926 | 1.0% | 62.7% |
+| 44 | 0.60 | 91.3% | 41 / 3 / 428 | 0.953 | 0.5% | 45.5% |
+| 45 | 0.45 | 69.7% | 143 / 35 / 294 | 0.648 | 0.7% | 83.7% |
+| 46 | 0.55 | 83.7% | 77 / 49 / 346 | 0.789 | 0.3% | 55.0% |
+
+(207 beats with current features: 1,532 N, 209 V, 106 S.)
+- 70–96% of flutter waves are called abnormal, nearly all as V. The same models flag 46–84% of 207's real V beats.
+- So a beat model fed flutter detections would produce a stream of V calls. This is incidental, not designed: it comes from one patient and varies with the seed. It is not a flutter detector, and the device must not rely on it.
+- Not checked: what a real detector emits during these episodes (recorded under the parked Pan-Tompkins item).
+
+**Deployment requirements (added to the firmware needs):**
+- When the R-R history breaks (detected flutter/fibrillation, lead-off, long noise, detector dropout), restart it with the same warm-up as at a record start. Clip extreme z-scores rather than feed them: one 100 s interval would be z ≈ 430 at fold 1's `pre_rr` std of 0.23 s.
+- During a detected episode, raise the rhythm alarm and keep running the beat model, marking its output. Never drop beats because of a detector's verdict:
+  - Ventricular flutter and fast VT overlap in rate (207's flutter: 176–214/min; VT roughly 150–250/min), so a detector can mistake a VT run for flutter.
+  - Artifacts are a common cause of false VF/VT alarms.
+
+**Sanity rerun (pending).** nsv_matched + `--normalize-rr` with the fixed features, seeds 42–46, in `stage2/item1_207_fix`, compared with `stage2/step3b_rr_norm` by `compare_oof.py`.
+- It passes if neither INT8 OOF S PR-AUC nor V PR-AUC drops by more than the larger of the two runs' seed std. It is not a decision to adopt anything.
+- Expected direction: `pre_rr` std is 0.855–0.897 in the four folds that train on 207 (seed 42) and 0.794 for the final model, against 0.232 in fold 1. The fix should bring all of them near fold 1's value, so every beat's normalized inputs change, not just 207's.
+- The rerun becomes the reference for item 2.
