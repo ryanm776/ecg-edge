@@ -25,6 +25,11 @@ WINDOW_SIZE = 250
 # change "+", noise "~", isolated artifact "|", "x", "!", comments, ...) is not a beat.
 BEAT_SYMBOLS = frozenset("NLRBAaJSVrFejnE/fQ?")
 
+# Ventricular flutter/fibrillation onset "[", offset "]" and flutter wave "!". The heart is active
+# throughout such an episode but produces no beats, so an interval between two beats that spans one is
+# not an R-R interval (as in the AAMI EC57 reference code, WFDB bxb). See diagnosis.md, "Stage 2 item 1".
+EPISODE_SYMBOLS = frozenset("[]!")
+
 
 def type_recall(y, symbols, probs, threshold):
     """Recall of each abnormal type at a threshold: {type: (n, detected, recall)}."""
@@ -141,10 +146,12 @@ def compute_spectrogram(window, fs, nperseg=64, noverlap=48):
 RR_LOOKBACK = 10
 
 
-def compute_rr_timing_features(rr_intervals, i, lookback=RR_LOOKBACK):
+def compute_rr_timing_features(rr_intervals, i, lookback=RR_LOOKBACK, history_start=0):
+    """R-R features of the beat between intervals i - 1 and i. `history_start` is the first interval
+    local_mean_rr may average (after an invalid interval, the history restarts like a record start)."""
     pre_rr = rr_intervals[i - 1]
     post_rr = rr_intervals[i]
-    start_k = max(0, i - lookback)
+    start_k = max(history_start, i - lookback)
     local_mean_rr = np.mean(rr_intervals[start_k:i])
     rr_ratio = pre_rr / local_mean_rr if local_mean_rr > 0 else 1.0
     pre_post_ratio = pre_rr / post_rr if post_rr > 0 else 1.0
@@ -164,6 +171,15 @@ def rr_quantile_ratio(rr_intervals, i, lookback=10, q=0.5):
 def beat_annotation_mask(symbols):
     """True where an annotation marks a beat (BEAT_SYMBOLS), False for non-beat annotations."""
     return np.array([s in BEAT_SYMBOLS for s in symbols], dtype=bool)
+
+
+def valid_rr_mask(symbols, positions):
+    """For each interval positions[k] -> positions[k + 1] (annotation indices), True unless an
+    EPISODE_SYMBOLS annotation lies between them."""
+    episode = np.flatnonzero([s in EPISODE_SYMBOLS for s in symbols])
+    positions = np.asarray(positions)
+    inside = np.searchsorted(episode, positions[1:]) - np.searchsorted(episode, positions[:-1], side="right")
+    return inside == 0
 
 
 def fit_rr_normalizer(X_rr):
@@ -196,7 +212,10 @@ def extract_beats_from_record(
 
     R-R intervals run between consecutive beat annotations (BEAT_SYMBOLS, so F and Q beats count as
     neighbors even though they aren't extracted); a beat is usable only with a beat annotation on
-    each side. `rr_from_all_annotations=True` restores the pre-fix behavior (intervals between
+    each side. An interval spanning a ventricular flutter/fibrillation episode (EPISODE_SYMBOLS) is
+    invalid: the beats on either side of the episode aren't extracted, and local_mean_rr after it
+    averages only intervals since the episode, as at a record start (diagnosis.md, "Stage 2 item 1").
+    `rr_from_all_annotations=True` restores the pre-fix behavior (intervals between
     consecutive annotations of any kind, including "+", "~", ...), only to reproduce runs made
     before beat-only R-R (artifacts/diagnosis.md, "Stage 1").
 
@@ -212,9 +231,13 @@ def extract_beats_from_record(
     samples = np.asarray(samples)
     if rr_from_all_annotations:
         positions = np.arange(len(samples))
+        valid = np.ones(max(len(positions) - 1, 0), dtype=bool)
     else:
         positions = np.flatnonzero(beat_annotation_mask(symbols))
+        valid = valid_rr_mask(symbols, positions)
     rr_intervals = np.diff(samples[positions]) / fs
+    # history_start[k]: first interval of the run of valid intervals that contains interval k.
+    history_start = np.maximum.accumulate(np.where(valid, -1, np.arange(len(valid)))) + 1
     normal_count = 0
 
     spec_list, rr_list, y_list, record_id_list, symbol_list = [], [], [], [], []
@@ -225,6 +248,8 @@ def extract_beats_from_record(
         sym = symbols[i]
 
         if sym not in SYMBOL_MAP:
+            continue
+        if not (valid[j - 1] and valid[j]):
             continue
         if sample_idx - half_window < 0 or sample_idx + half_window >= len(filtered_signal):
             continue
@@ -245,7 +270,8 @@ def extract_beats_from_record(
 
             window = filtered_signal[adj_idx - half_window: adj_idx + half_window]
             norm_spec = compute_spectrogram(window, fs)
-            rr_features = compute_rr_timing_features(rr_intervals, j, lookback=rr_lookback)
+            rr_features = compute_rr_timing_features(rr_intervals, j, lookback=rr_lookback,
+                                                     history_start=history_start[j - 1])
 
             spec_list.append(norm_spec)
             rr_list.append(rr_features)

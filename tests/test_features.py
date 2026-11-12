@@ -22,6 +22,7 @@ from ecg.features import (
     rr_quantile_ratio,
     sv_confusion,
     type_recall,
+    valid_rr_mask,
 )
 
 
@@ -328,3 +329,74 @@ def test_rr_lookback_window_is_truncated_at_the_record_start():
     # Beat j averages the j intervals before it while j < 30.
     for j in (1, 5, 29, 30, 31):
         assert X_rr[j - 1][2] == pytest.approx(np.mean(rr[max(0, j - 30):j]))
+
+
+def _record_with_a_flutter_episode():
+    """15 N beats 300 samples apart, a flutter episode ("[", rhythm "+", nine "!" waves, "]"), then 15 N
+    beats 250 apart with one 1000-sample pause (a real pause: no annotation inside it)."""
+    fs = 360
+    before = list(200 + 300 * np.arange(15))  # last beat 4400
+    episode = [4500, 4510] + list(range(4600, 5500, 100)) + [5500]
+    after = list(np.concatenate([[5800], 5800 + np.cumsum([250] * 6 + [1000] + [250] * 7)]))
+    samples = np.array(before + episode + after)
+    symbols = ["N"] * 15 + ["[", "+"] + ["!"] * 9 + ["]"] + ["N"] * 15
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(samples[-1] + 400) / fs)
+    return signal, fs, samples, symbols
+
+
+def test_valid_rr_mask_rejects_intervals_with_any_episode_annotation_between_the_beats():
+    symbols = ["N", "N", "[", "!", "]", "N", "!", "N", "+", "~", "N"]
+    beats = [0, 1, 5, 7, 10]
+    # 1->5 holds "[ ! ]"; 5->7 holds a lone "!" (an episode cut by the record edge); 7->10 holds only "+ ~".
+    np.testing.assert_array_equal(valid_rr_mask(symbols, beats), [True, False, False, True])
+
+
+@pytest.mark.parametrize("lookback", [3, 10])
+def test_flutter_episode_splits_the_record_like_two_separate_records(lookback):
+    signal, fs, samples, symbols = _record_with_a_flutter_episode()
+    rng = lambda: np.random.default_rng(0)  # noqa: E731
+    full = extract_beats_from_record(signal, fs, samples, symbols, "r", augment=True, rng=rng(),
+                                     rr_lookback=lookback)
+
+    # Each side of the episode, extracted as its own record (beat annotations only), in order.
+    before = extract_beats_from_record(signal, fs, samples[:15], symbols[:15], "r", augment=True, rng=rng(),
+                                       rr_lookback=lookback)
+    rng_after = rng()
+    rng_after.integers(-8, 9, size=len(before[0]) // 2)  # the full record's draws for the beats before
+    after = extract_beats_from_record(signal, fs, samples[-15:], symbols[-15:], "r", augment=True,
+                                      rng=rng_after, rr_lookback=lookback)
+
+    np.testing.assert_array_equal(np.array(full[0]), np.array(before[0] + after[0]))
+    np.testing.assert_array_equal(np.array(full[1]), np.array(before[1] + after[1]))
+    assert full[2:] == tuple(a + b for a, b in zip(before[2:], after[2:]))
+
+
+def test_flutter_episode_drops_the_boundary_beats_and_restarts_the_r_r_history():
+    signal, fs, samples, symbols = _record_with_a_flutter_episode()
+    beats = np.flatnonzero(beat_annotation_mask(symbols))
+
+    _, X_rr, _, _, syms = extract_beats_from_record(signal, fs, samples, symbols, "r")
+    X_rr = np.array(X_rr)
+
+    # 30 beats: the two record ends and the two beats beside the episode (4400, 5800) aren't extracted.
+    assert len(beats) == 30 and len(syms) == 30 - 2 - 2
+    spanning = (5800 - 4400) / fs
+    assert not np.isclose(X_rr[:, :2], spanning).any()
+    # The first beat after the episode that is extracted (6050) averages only the one interval since it.
+    first_after = 13  # 13 beats (1..13) extracted before the episode
+    assert X_rr[first_after, 0] == pytest.approx(250 / fs)
+    assert X_rr[first_after, 2] == pytest.approx(250 / fs)
+    assert X_rr[first_after, 3] == pytest.approx(1.0)
+    # The 1000-sample pause has no annotation inside it, so it is a valid R-R interval and is kept.
+    assert np.isclose(X_rr[:, 0], 1000 / fs).sum() == 1
+    assert np.isclose(X_rr[:, 1], 1000 / fs).sum() == 1
+
+
+def test_records_without_episodes_are_unchanged():
+    for make in (_record_with_nonbeat_annotations, _record_with_a_premature_run):
+        signal, fs, samples, symbols = make()
+        beats = [i for i, s in enumerate(symbols) if s in BEAT_SYMBOLS]
+        rr = np.diff(samples[beats]) / fs
+        _, X_rr, *_ = extract_beats_from_record(signal, fs, samples, symbols, "r")
+        kept_j = [j for j in range(1, len(beats) - 1) if symbols[beats[j]] in SYMBOL_MAP]
+        assert X_rr == [compute_rr_timing_features(rr, j) for j in kept_j]
