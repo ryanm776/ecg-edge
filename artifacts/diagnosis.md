@@ -1216,7 +1216,65 @@ Fixed on 2026-11-02, after the step 3b results and before any further run. This 
   - Ventricular flutter and fast VT overlap in rate (207's flutter: 176–214/min; VT roughly 150–250/min), so a detector can mistake a VT run for flutter.
   - Artifacts are a common cause of false VF/VT alarms.
 
-**Sanity rerun (pending).** nsv_matched + `--normalize-rr` with the fixed features, seeds 42–46, in `stage2/item1_207_fix`, compared with `stage2/step3b_rr_norm` by `compare_oof.py`.
+**Sanity rerun (done, passes; see "Stage 2 item 1 results").** nsv_matched + `--normalize-rr` with the fixed features, seeds 42–46, in `stage2/item1_207_fix`, compared with `stage2/step3b_rr_norm` by `compare_oof.py`.
 - It passes if neither INT8 OOF S PR-AUC nor V PR-AUC drops by more than the larger of the two runs' seed std. It is not a decision to adopt anything.
 - Expected direction: `pre_rr` std is 0.855–0.897 in the four folds that train on 207 (seed 42) and 0.794 for the final model, against 0.232 in fold 1. The fix should bring all of them near fold 1's value, so every beat's normalized inputs change, not just 207's.
 - The rerun becomes the reference for item 2.
+
+## Stage 2 item 1 results: sanity rerun with the 207 fix
+
+**Runs.** item1 is nsv_matched + `--normalize-rr` with lookback 10, trained on the fixed features with seeds 42–46 (`stage2/item1_207_fix`). The reference is rr_norm (`stage2/step3b_rr_norm`), the same configuration on the pre-fix features.
+- Every run has the intended configuration: matched weights N 0.75 / S 0.25 / V 0.25 (loss_scale 0.627), early stopping on val_loss, lookback 10, `normalize_rr` true.
+- The OOF pool is 48,585 beats. That is rr_norm's 48,596 minus the 11 beats of 207 the fix drops.
+
+**R-R statistics moved as expected.**
+- `pre_rr` std, seed 42, folds 0–4: 0.216 / 0.232 / 0.234 / 0.228 / 0.218, against 0.855 / 0.232 / 0.870 / 0.897 / 0.881 before. Fold 1 holds 207 out, so its training view and statistics are unchanged, as they should be.
+- Final model (`rr_norm.json`, the same for every seed): mean 0.744 / 0.806 / 0.779 / 0.955 / 0.965, std 0.226 / 0.238 / 0.184 / 0.175 / 0.285 (`pre_rr`, `post_rr`, `local_mean_rr`, `rr_ratio`, `pre_post_ratio`). Before: std 0.794 / 0.293 / 0.315 / 0.197 / 0.490. The approximate estimates in the 3b review (0.225 / 0.238 / 0.183 / 0.175 / 0.285) were close.
+- So every beat's normalized R-R inputs changed, not just 207's. This rerun can't separate the effect of 207's corrected features from the effect of the new scaling on all beats, and it isn't meant to.
+
+**Pass check: pooled OOF, INT8.** Seeds 42 / 43 / 44 / 45 / 46, then mean ± std. Table: `stage2/item1/oof_comparison.md`.
+
+| Metric | rr_norm (pre-fix) | item1 | Change | Spread | Exceeds / separated |
+|---|---|---|---|---|---|
+| **S PR-AUC** | 0.244 / 0.211 / 0.186 / 0.288 / 0.223 = 0.230 ± 0.038 | 0.318 / 0.345 / 0.254 / 0.201 / 0.303 = 0.284 ± 0.057 | +0.054 | 0.057 | no / no |
+| S ROC-AUC | 0.876 / 0.878 / 0.777 / 0.867 / 0.852 = 0.850 ± 0.042 | 0.895 / 0.876 / 0.892 / 0.898 / 0.889 = 0.890 ± 0.008 | +0.040 | 0.042 | no / no |
+| **V PR-AUC** | 0.911 / 0.932 / 0.942 / 0.947 / 0.934 = 0.933 ± 0.014 | 0.924 / 0.953 / 0.908 / 0.923 / 0.947 = 0.931 ± 0.019 | −0.002 | 0.019 | no / no |
+| V ROC-AUC | 0.983 ± 0.006 | 0.984 ± 0.005 | +0.001 | 0.006 | no / no |
+
+- **It passes:** neither S nor V PR-AUC drops by more than the larger seed std. S PR-AUC rises; V PR-AUC is flat.
+- None of the changes exceeds the spread, so by the decision rule nothing here counts as a gain. Paired by seed, S PR-AUC is higher in 4 of 5 seeds and lower in seed 45 (0.288 → 0.201).
+- S ROC-AUC spread falls from 0.042 to 0.008, mostly from seed 44 (0.777 → 0.892).
+- The float rows give the same verdicts. INT8 − float: the largest per-seed gap of any decision metric is 0.003 (S PR-AUC). No quantization gap.
+- **item1 (`stage2/item1_207_fix`) is the reference for item 2.**
+
+**Descriptive (never decisive):**
+- **Per-record S vs. own-N ROC-AUC, item1 against rr_norm:**
+  - 118: 0.998–1.000 against 0.979–0.998.
+  - 207: 0.987–0.996 against 0.969–0.996. 220: 0.990–0.999 against 0.986–1.000. 223: 0.983–0.996 against 0.980–0.997.
+  - 209: 0.815–0.972 against 0.830–0.976.
+  - 124: 0.274–0.589 against 0.386–0.616, still near or below chance.
+- **Record 207 at each seed's threshold** (item1 / rr_norm, seeds 42–46):
+  - FP side, N beats flagged: 27 / 25 / 9 / 4 / 29 of 1,532, against 15 / 22 / 13 / 22 / 19 of 1,542.
+  - FN side, S beats flagged: 105 / 106 / 99 / 10 / 83 of 106, against 72 / 93 / 98 / 99 / 57. In seed 45 (threshold 0.65), 96 of 207's 106 S beats are missed, although its S ROC-AUC there is 0.993: the S beats are ranked above the N beats but score below the threshold.
+  - FN side, V beats flagged: 115 / 193 / 135 / 170 / 185 of 209, against 136 / 136 / 100 / 182 / 124 of 210.
+- S vs. N ROC-AUC on P(S): 0.857 ± 0.032, against 0.845 ± 0.043.
+- **At each run's selected threshold:**
+  - Thresholds: item1 0.45 / 0.45 / 0.65 / 0.65 / 0.40, rr_norm 0.50 / 0.50 / 0.60 / 0.45 / 0.55.
+  - FN side: S recall (flagged abnormal) 0.455 ± 0.038 against 0.362 ± 0.092; V recall 0.903 ± 0.023 against 0.891 ± 0.032.
+  - FP side: N false-positive rate 0.014 ± 0.003 against 0.015 ± 0.006.
+  - S ↔ V mix-ups: S called V 154.4 ± 28.6 against 136.0 ± 50.5; V called S 290.8 ± 92.4 against 268.2 ± 110.9.
+- **At target recall 0.90:**
+  - FN side: S flagged 0.643 ± 0.013 (rr_norm 0.637 ± 0.027), S under the call rule 0.418 ± 0.033 (0.435 ± 0.044), V under the call rule 0.849 ± 0.020 (0.865 ± 0.027).
+  - FP side: 2,691 ± 362 N false positives (3,610 ± 1,233), precision 0.597 ± 0.033 (0.535 ± 0.092), +P_S 0.160 ± 0.040 (0.192 ± 0.052), +P_V 0.698 ± 0.080 (0.568 ± 0.103).
+  - At target recall 0.95: 9,627 ± 806 FPs (14,333 ± 4,700), +P_S 0.080 ± 0.019 (0.061 ± 0.023).
+
+**DS2, final models (INT8, at each seed's pooled-OOF threshold; reported, never used for a choice):**
+
+| Cell | PR-AUC | F1 | FP | FN | Se_S | +P_S | Se_V | +P_V |
+|---|---|---|---|---|---|---|---|---|
+| rr_norm (pre-fix) | 0.867 ± 0.033 | 0.771 ± 0.038 | 1,321 ± 1,013 | 1,065 ± 544 | 0.329 ± 0.225 | 0.355 ± 0.100 | 0.839 ± 0.079 | 0.811 ± 0.138 |
+| item1 | 0.884 ± 0.020 | 0.809 ± 0.023 | 1,009 ± 594 | 940 ± 399 | 0.438 ± 0.225 | 0.526 ± 0.101 | 0.906 ± 0.067 | 0.847 ± 0.072 |
+
+- DS2 S beats called V: item1 239.4 ± 160.1, rr_norm 321.2 ± 269.8.
+- Final epochs: item1 18 / 17 / 9 / 18 / 16, rr_norm 18 / 19 / 20 / 14 / 16.
+- The unresolved final-model procedure applies. Seed 44's final model trains for 9 epochs and gets DS2 Se_S 0.080 at threshold 0.65 (FN 1,585, FP 328). DS2 Se_S ranges 0.080–0.657 across seeds.
