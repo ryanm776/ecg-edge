@@ -57,6 +57,7 @@ print("RESULT " + json.dumps(result))
 """
 
 
+@pytest.mark.slow
 def test_qat_quantize_convert_and_predict(tmp_path):
     env = dict(os.environ, TF_USE_LEGACY_KERAS="1", PYTHONPATH=str(REPO_ROOT))
     proc = subprocess.run(

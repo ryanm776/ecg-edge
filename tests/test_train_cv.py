@@ -73,6 +73,7 @@ def _fake_build_dataset(record_list, data_dir, max_normal_per_record=None, augme
     return X_spec, X_rr, y, record_ids
 
 
+@pytest.mark.slow
 def test_train_cv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     from ecg import data, evaluate
 
@@ -121,6 +122,7 @@ def test_train_cv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     assert "Grouped CV over DS1" in (tmp_path / "cv_comparison.md").read_text(encoding="utf-8")
 
 
+@pytest.mark.slow
 def test_train_cv_caps_normal_beats_in_training_only(monkeypatch, tmp_path):
     from ecg import data
 
@@ -157,6 +159,7 @@ def test_train_cv_caps_normal_beats_in_training_only(monkeypatch, tmp_path):
         assert oof["symbols"][oof["record_ids"] == rec].tolist() == SYMBOLS.tolist()
 
 
+@pytest.mark.slow
 def test_train_cv_balanced_records_per_fold_weights_and_monitor(monkeypatch, tmp_path):
     from ecg import cv, data
     from ecg.features import balanced_class_weights, nsv_labels
@@ -263,6 +266,7 @@ def test_train_cv_balanced_weights_need_nsv(monkeypatch, tmp_path):
         _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--loss-weights", "balanced")
 
 
+@pytest.mark.slow
 def test_train_cv_nsv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     from ecg import data, evaluate
     from ecg.features import aami_class_metrics, sv_confusion
@@ -309,6 +313,7 @@ def test_train_cv_nsv_end_to_end_on_synthetic_data(monkeypatch, tmp_path):
     assert (summary["variant"] == "bn_folded+nsv").all()
 
 
+@pytest.mark.slow
 def test_train_cv_rr_lookback_reaches_every_view_and_is_recorded(monkeypatch, tmp_path):
     from ecg import data
 
@@ -333,6 +338,7 @@ def test_train_cv_rr_lookback_reaches_every_view_and_is_recorded(monkeypatch, tm
         _parse(monkeypatch, "--artifacts-dir", str(tmp_path), "--seeds", "43", "--classes", "nsv")
 
 
+@pytest.mark.slow
 def test_train_cv_normalize_rr_fits_each_model_on_its_own_training_view(monkeypatch, tmp_path):
     from ecg import cv, data, evaluate
     from ecg.features import apply_rr_normalizer, fit_rr_normalizer
