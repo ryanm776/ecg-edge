@@ -26,7 +26,9 @@ python scripts/analyze_splits.py    # read-only val/test split diagnosis with th
 python scripts/analyze_splits.py --counts-only  # beat composition per split only, no models (use after a split change)
 python scripts/compare_oof.py --runs <ref>=<ref-cv-dir> <new>=<new-cv-dir> --out-dir artifacts/dechazal/stage2/<step>  # Stage 2 decision table: pooled OOF per-class AUC + gain vs. seed spread
 python scripts/diagnose_s_beats.py  # read-only Stage 1 diagnosis on the CV runs, steps 0 1 2 4 (--steps 3 = slow shuffle test) -> artifacts/dechazal/stage1/
-pytest                            # unit tests (features, export, threshold selection) — no network/data needed
+pytest                            # fast tests, ~30 s, no network/data needed (pytest.ini deselects the `slow` marker)
+pytest -m slow                    # the 7 tests that train real models (train_cv end to end, QAT), ~4 min; run before committing a change to ecg/ or scripts/
+pytest -m ""                      # all tests
 ```
 
 ## Working with the `ecg` package
