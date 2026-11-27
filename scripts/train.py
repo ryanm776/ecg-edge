@@ -24,7 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ecg.features import aami_class_metrics, type_recall  # noqa: E402  (numpy/scipy only)
+from ecg.features import aami_class_metrics, sv_confusion, type_recall  # noqa: E402  (numpy/scipy only)
 
 # de Chazal et al., IEEE TBME 2004 inter-patient split: DS1 = train + val, DS2 = test.
 # The paced records are excluded from both.
@@ -105,32 +105,62 @@ def parse_args():
 EARLY_STOP_PATIENCE = 12
 
 
-def build_model(variant, spec_shape, tf, ecg_model):
-    """The float model for a variant (qat starts from the bn_folded architecture)."""
+def build_model(variant, spec_shape, tf, ecg_model, n_classes=1):
+    """The float model for a variant (qat starts from the bn_folded architecture). `n_classes=3` gives
+    the N/S/V softmax head, bn_folded only."""
     if variant == "baseline":
+        if n_classes != 1:
+            raise ValueError("The baseline architecture is binary only")
         return ecg_model.build_multiscale_ptq_model(spec_shape)
-    return ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras)
+    return ecg_model.build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras, n_classes=n_classes)
 
 
-def fit_model(m, tf, ecg_model, x_train, y_train, validation_data, lr, epochs, batch_size):
-    """Compile with focal loss and fit. With `validation_data`, early-stop on val_loss (best weights
-    restored) and return the best epoch (1-based); without it, train all `epochs` and return `epochs`.
+MONITOR_KEY = "val_monitor_loss"
+
+
+def val_loss_monitor(tf, loss_fn, x_val, y_val, batch_size):
+    """Callback that logs `loss_fn` on the validation data plus the model's regularization losses as
+    MONITOR_KEY at each epoch end: the quantity Keras' val_loss would be with `loss_fn` as the training loss.
+    It must come before any callback that reads MONITOR_KEY."""
+
+    class ValLossMonitor(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            pred = self.model.predict(x_val, batch_size=batch_size, verbose=0)
+            value = float(loss_fn(y_val, pred)) + sum(float(r) for r in self.model.losses)
+            if logs is not None:
+                logs[MONITOR_KEY] = value
+
+    return ValLossMonitor()
+
+
+def fit_model(m, tf, ecg_model, x_train, y_train, validation_data, lr, epochs, batch_size, loss=None,
+              monitor_loss=None):
+    """Compile and fit; `loss=None` is the binary focal loss (gamma 2, alpha 0.25). With `validation_data`,
+    early-stop on val_loss (best weights restored) and return the best epoch (1-based); without it, train
+    all `epochs` and return `epochs`.
+
+    `monitor_loss`: early-stop on this loss over the validation data (plus the regularization losses, as in
+    val_loss) instead of on val_loss, e.g. an unweighted loss when the training loss is class-weighted.
     """
-    m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-              loss=ecg_model.focal_loss(gamma=2.0, alpha=0.25), metrics=["accuracy"])
-    callbacks = []
+    if loss is None:
+        loss = ecg_model.focal_loss(gamma=2.0, alpha=0.25)
+    m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr), loss=loss, metrics=["accuracy"])
+    callbacks, monitor = [], "val_loss"
     if validation_data is not None:
+        if monitor_loss is not None:
+            callbacks.append(val_loss_monitor(tf, monitor_loss, *validation_data, batch_size))
+            monitor = MONITOR_KEY
         callbacks.append(tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=EARLY_STOP_PATIENCE, restore_best_weights=True))
+            monitor=monitor, mode="min", patience=EARLY_STOP_PATIENCE, restore_best_weights=True))
     history = m.fit(x=x_train, y=y_train, validation_data=validation_data, epochs=epochs,
                     batch_size=batch_size, callbacks=callbacks)
     if validation_data is None:
         return epochs
-    return int(np.argmin(history.history["val_loss"])) + 1
+    return int(np.argmin(history.history[monitor])) + 1
 
 
 def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, preds, threshold, float_threshold,
-                    tflite_kb, levels, evaluate):
+                    tflite_kb, levels, evaluate, class_probs=None):
     """One row per (model, threshold source): float @ INT8-val threshold, float @ its own
     val threshold, and INT8 @ INT8-val threshold. Every column is computed from the row's
     own model: `val_f1` from that model's val sweep, PR/ROC-AUC from its test probabilities,
@@ -138,6 +168,11 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, p
 
     `preds` maps "float"/"int8" to (val_probs, val_sweep, test_probs). The `*_excl_<OVERLAP_RECORD>`
     columns re-evaluate test without the record whose patient is also in train.
+
+    `class_probs` (multiclass models) maps "float"/"int8" to the (n, 3) N/S/V test probabilities. AAMI Se and
+    +P then come from evaluate.predicted_classes at the row's threshold, and `S_as_V` / `V_as_S` count S <-> V
+    mix-ups; without it (binary) Se is the fraction called abnormal and +P and the mix-up counts are NaN.
+    `recall_ventricular` / `recall_supraventricular` are always the fraction called abnormal.
     """
     keep = np.asarray(record_ids_test) != OVERLAP_RECORD
     y_keep, records_keep = np.asarray(y_test)[keep], np.asarray(record_ids_test)[keep]
@@ -150,7 +185,13 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, p
         excl, _ = evaluate.evaluate_predictions(y_keep, np.asarray(test_probs)[keep], records_keep, t)
         (_, excl_fp), (excl_fn, _) = excl["confusion_matrix"]
         by_type = type_recall(y_test, symbols_test, test_probs, t)
-        aami = aami_class_metrics(symbols_test, abnormal_pred=np.asarray(test_probs) > t)
+        if class_probs is None:
+            aami = aami_class_metrics(symbols_test, abnormal_pred=np.asarray(test_probs) > t)
+            mixups = {"S_as_V": np.nan, "V_as_S": np.nan}
+        else:
+            pred_classes = evaluate.predicted_classes(class_probs[model_name], t)
+            aami = aami_class_metrics(symbols_test, pred_classes=pred_classes)
+            mixups = sv_confusion(symbols_test, pred_classes)
 
         t_recall = evaluate.threshold_at_recall(y_val, val_probs, args.target_recall)
         at_recall, _ = evaluate.evaluate_predictions(y_test, test_probs, record_ids_test, t_recall)
@@ -176,6 +217,7 @@ def comparison_rows(label, args, y_val, y_test, record_ids_test, symbols_test, p
             "pp_V": aami["V"][2],
             "se_S": aami["S"][1],
             "pp_S": aami["S"][2],
+            **mixups,
             f"fp_rec{FOCUS_RECORD}": fp_focus,
             f"fp_excl_{FOCUS_RECORD}": fp - fp_focus,
             "n_beats": overall["n_beats"],

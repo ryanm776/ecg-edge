@@ -12,6 +12,7 @@ from sklearn.metrics import (
 )
 
 from .export import dequantize_value, quantize_value
+from .features import NSV_CLASSES
 
 THRESHOLD_SWEEP = np.round(np.arange(0.05, 0.96, 0.05), 2)
 
@@ -28,6 +29,22 @@ def abnormal_score(probs, normal_index=0):
     if probs.ndim != 2:
         raise ValueError(f"Expected (n,), (n, 1) or (n, k) probabilities, got shape {probs.shape}")
     return 1.0 - probs[:, normal_index]
+
+
+def predicted_classes(probs, threshold, classes=NSV_CLASSES):
+    """Class call per beat from (n, k) multiclass probabilities, tied to the abnormal-score threshold.
+
+    A beat is called `classes[0]` (N) unless abnormal_score > threshold, the same rule as the binary
+    decision; otherwise it gets the most probable abnormal class (ties go to the earlier column, S).
+    So the N-vs-abnormal split always matches the thresholded abnormal_score, and S vs. V only decides
+    which abnormal class.
+    """
+    probs = np.asarray(probs)
+    if probs.ndim != 2 or probs.shape[1] != len(classes):
+        raise ValueError(f"Expected (n, {len(classes)}) probabilities, got shape {probs.shape}")
+    abnormal = abnormal_score(probs) > threshold
+    best_abnormal = 1 + np.argmax(probs[:, 1:], axis=1)
+    return np.asarray(classes, dtype=object)[np.where(abnormal, best_abnormal, 0)]
 
 
 def _sweep_thresholds(y_true, probs, thresholds):
@@ -104,7 +121,8 @@ def _bind_inputs(input_details, n_rr_features=5):
 
 
 def predict_tflite(tflite_path, X_spec, X_rr):
-    """Run the INT8 .tflite model over a dataset, returning dequantized probabilities."""
+    """Run the INT8 .tflite model over a dataset, returning dequantized probabilities: shape (n,) for a
+    binary (one-unit) output, (n, k) for a k-class output."""
     interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
     interpreter.allocate_tensors()
 
@@ -118,7 +136,8 @@ def predict_tflite(tflite_path, X_spec, X_rr):
     rr_scale, rr_zp = rr_detail["quantization"]
     out_scale, out_zp = out_detail["quantization"]
 
-    probs = np.empty(len(X_spec), dtype=np.float32)
+    n_outputs = int(np.prod(out_detail["shape"][1:]))
+    probs = np.empty((len(X_spec), n_outputs), dtype=np.float32)
 
     for i in range(len(X_spec)):
         spec_q = quantize_value(X_spec[i:i + 1], spec_scale, spec_zp)
@@ -128,10 +147,10 @@ def predict_tflite(tflite_path, X_spec, X_rr):
         interpreter.set_tensor(rr_detail["index"], rr_q)
         interpreter.invoke()
 
-        raw_output = interpreter.get_tensor(out_detail["index"])[0, 0]
+        raw_output = interpreter.get_tensor(out_detail["index"]).reshape(-1)
         probs[i] = dequantize_value(raw_output, out_scale, out_zp)
 
-    return probs
+    return probs[:, 0] if n_outputs == 1 else probs
 
 
 def min_int8_levels(tflite_path, X_spec, X_rr):

@@ -73,8 +73,17 @@ They will be regenerated with the bn_folded model once the final-model procedure
 ### Differences from the original notebook
 
 `train_pipeline.ipynb` is the superseded Colab version. Its results aren't comparable with this
-pipeline's: it used a different split, capped normal beats on validation and test at 600/record,
-tuned the threshold on test, and evaluated only the float model.
+pipeline's:
+
+| | Notebook (`train_pipeline.ipynb`) | This pipeline (`train.py`, `train_cv.py`) |
+|---|---|---|
+| Split | Hand-picked by record: 22 train, 8 validation, 8 test | de Chazal inter-patient split: train and validation (or grouped CV) within DS1, test = DS2; paced records excluded |
+| Normal-beat cap | First 600 normal beats per record, on train, validation **and test** | First 600 normal beats per record, **training only** (`--max-normal-per-record-train`, default 600). Validation, CV out-of-fold and test predictions use every beat |
+| Threshold | Swept on the test set's predictions (0.50–0.60, then 0.30–0.50) | Selected on validation (`train.py`) or pooled out-of-fold (`train_cv.py`) predictions, never on test |
+| Evaluated models | Float Keras model only. The INT8 model is converted and exported but never evaluated | Float and INT8 models. The threshold is chosen on the INT8 model's predictions, since INT8 is what's deployed |
+
+Because the notebook caps test normals, its test set under-represents normal beats, so its
+precision and false-positive counts aren't comparable with this pipeline's either.
 
 ### Data split
 
@@ -118,7 +127,25 @@ Known limitations:
 
 ```bash
 python scripts/train_cv.py --seeds 42 43 44     # bn_folded only
+python scripts/train_cv.py --seeds 42 43 44 --classes nsv --loss-weights none \
+    --artifacts-dir artifacts/dechazal/stage2/<step>   # N/S/V softmax, unweighted focal loss
+python scripts/train_cv.py --seeds 42 43 44 --classes nsv --loss-weights balanced \
+    --artifacts-dir artifacts/dechazal/stage2/<step>   # N/S/V softmax, inverse-frequency class weights
 ```
+
+- `--classes nsv` trains a softmax over N, S and V instead of the binary model. **The classes are N/S/V
+  only:** F and Q beats are dropped, as in the binary model, so results are not directly comparable
+  with papers that report the full five AAMI classes.
+- `--loss-weights none` drops the focal loss's class weighting. The default, `matched`, is
+  alpha 0.25 for binary, and N 0.75 / S 0.25 / V 0.25 for N/S/V.
+- `--loss-weights balanced` (N/S/V only) weights each class by its inverse frequency in the model's own
+  training data (each fold's, and all of DS1 for the final model). The weights are normalized so that
+  their frequency-weighted mean is 1, which keeps the loss at the scale of an unweighted one. Fold models
+  then early-stop on the *unweighted* validation loss, so the S-heavy weighting doesn't pick the
+  stopping epoch on the patients being scored.
+- Each run records its loss weights, loss scale (frequency-weighted mean weight) and early-stopping
+  criterion: per fold in `folds.json`, and for the final model in `metrics.json`.
+- One `--artifacts-dir` holds one configuration; `train_cv.py` refuses to mix them.
 
 A fixed 5-record validation set gives an unstable operating point: across seeds 42–44, bn_folded's
 DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split results").
@@ -127,7 +154,9 @@ DS2 FP count was 3,665 ± 3,630 (`artifacts/diagnosis.md`, "de Chazal split resu
 1. **5 folds** (`CV_FOLDS` in `scripts/train.py`). Each fold model trains on DS1 minus the fold and
    early-stops on the held-out fold, is converted to INT8, and scores the held-out fold.
 2. **Threshold** is selected on the pooled out-of-fold INT8 scores from 21 DS1 records. Scores go
-   through `evaluate.abnormal_score`: P(abnormal) for binary output, 1 − P(N) for multiclass.
+   through `evaluate.abnormal_score`: P(abnormal) for binary output, 1 − P(N) for multiclass. A
+   multiclass model calls a beat N below the threshold, and the likelier of S and V above it. AAMI
+   Se and +P count that call.
 3. **Final model** trains on all 22 DS1 records for the median of the folds' best epochs, with no
    early stopping and no ensembling (ESP32 limits). It is evaluated once on DS2 at that threshold.
 

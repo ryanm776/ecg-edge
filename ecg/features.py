@@ -25,6 +25,11 @@ WINDOW_SIZE = 250
 # change "+", noise "~", isolated artifact "|", "x", "!", comments, ...) is not a beat.
 BEAT_SYMBOLS = frozenset("NLRBAaJSVrFejnE/fQ?")
 
+# Ventricular flutter/fibrillation onset "[", offset "]" and flutter wave "!". The heart is active
+# throughout such an episode but produces no beats, so an interval between two beats that spans one is
+# not an R-R interval (as in the AAMI EC57 reference code, WFDB bxb). See diagnosis.md, "Stage 2 item 1".
+EPISODE_SYMBOLS = frozenset("[]!")
+
 
 def type_recall(y, symbols, probs, threshold):
     """Recall of each abnormal type at a threshold: {type: (n, detected, recall)}."""
@@ -54,6 +59,41 @@ def aami_class(symbols):
     return out
 
 
+#: Column order of the N/S/V multiclass model's output, and the integer label of each class.
+NSV_CLASSES = ("N", "S", "V")
+
+
+def nsv_labels(symbols):
+    """Integer N/S/V training labels (0 = N, 1 = S, 2 = V, the NSV_CLASSES order) from annotation symbols.
+
+    Raises on a symbol outside the three classes (extract_beats_from_record only keeps SYMBOL_MAP symbols).
+    """
+    classes = aami_class(symbols)
+    if np.any(classes == ""):
+        raise ValueError(f"Symbols outside N/S/V: {sorted(set(np.asarray(symbols)[classes == '']))}")
+    return np.array([NSV_CLASSES.index(c) for c in classes], dtype=np.int32)
+
+
+def balanced_class_weights(labels, n_classes=len(NSV_CLASSES)):
+    """Inverse-frequency class weights over integer `labels`, normalized so the frequency-weighted mean is 1.
+
+    w_c = 1 / (n_classes * f_c), so every class contributes the same total weight and the data loss keeps the
+    scale of an unweighted loss (Stage 2 step 2b). Raises if a class has no beats.
+    """
+    counts = np.bincount(np.asarray(labels), minlength=n_classes)
+    if len(counts) != n_classes or np.any(counts == 0):
+        raise ValueError(f"Expected beats of each of {n_classes} classes, got counts {counts.tolist()}")
+    return counts.sum() / (n_classes * counts)
+
+
+def loss_scale(labels, class_weights, n_classes=len(NSV_CLASSES)):
+    """Frequency-weighted mean class weight over integer `labels`: 1 for unweighted and balanced weights."""
+    if class_weights is None:
+        return 1.0
+    freq = np.bincount(np.asarray(labels), minlength=n_classes) / len(labels)
+    return float(freq @ np.asarray(class_weights, dtype=float))
+
+
 def aami_class_metrics(symbols, abnormal_pred=None, pred_classes=None):
     """AAMI sensitivity (Se) and positive predictivity (+P) for S and V: {cls: (n, se, pp)}.
 
@@ -80,6 +120,13 @@ def aami_class_metrics(symbols, abnormal_pred=None, pred_classes=None):
     return out
 
 
+def sv_confusion(symbols, pred_classes):
+    """S <-> V mix-ups of a multiclass model: {"S_as_V": true S called V, "V_as_S": true V called S}."""
+    true, pred = aami_class(symbols), np.asarray(pred_classes)
+    return {"S_as_V": int(((true == "S") & (pred == "V")).sum()),
+            "V_as_S": int(((true == "V") & (pred == "S")).sum())}
+
+
 def bandpass_filter(raw_signal, fs, low=0.5, high=40.0):
     nyq = 0.5 * fs
     b, a = signal.butter(2, [low / nyq, high / nyq], btype="band")
@@ -95,10 +142,16 @@ def compute_spectrogram(window, fs, nperseg=64, noverlap=48):
     return sxx_log
 
 
-def compute_rr_timing_features(rr_intervals, i, lookback=10):
+# Intervals averaged into local_mean_rr (Stage 2 step 3a compares 30; diagnosis.md, "Step 3 design").
+RR_LOOKBACK = 10
+
+
+def compute_rr_timing_features(rr_intervals, i, lookback=RR_LOOKBACK, history_start=0):
+    """R-R features of the beat between intervals i - 1 and i. `history_start` is the first interval
+    local_mean_rr may average (after an invalid interval, the history restarts like a record start)."""
     pre_rr = rr_intervals[i - 1]
     post_rr = rr_intervals[i]
-    start_k = max(0, i - lookback)
+    start_k = max(history_start, i - lookback)
     local_mean_rr = np.mean(rr_intervals[start_k:i])
     rr_ratio = pre_rr / local_mean_rr if local_mean_rr > 0 else 1.0
     pre_post_ratio = pre_rr / post_rr if post_rr > 0 else 1.0
@@ -118,6 +171,15 @@ def rr_quantile_ratio(rr_intervals, i, lookback=10, q=0.5):
 def beat_annotation_mask(symbols):
     """True where an annotation marks a beat (BEAT_SYMBOLS), False for non-beat annotations."""
     return np.array([s in BEAT_SYMBOLS for s in symbols], dtype=bool)
+
+
+def valid_rr_mask(symbols, positions):
+    """For each interval positions[k] -> positions[k + 1] (annotation indices), True unless an
+    EPISODE_SYMBOLS annotation lies between them."""
+    episode = np.flatnonzero([s in EPISODE_SYMBOLS for s in symbols])
+    positions = np.asarray(positions)
+    inside = np.searchsorted(episode, positions[1:]) - np.searchsorted(episode, positions[:-1], side="right")
+    return inside == 0
 
 
 def fit_rr_normalizer(X_rr):
@@ -144,17 +206,23 @@ def extract_beats_from_record(
     window_size=WINDOW_SIZE,
     rng=None,
     rr_from_all_annotations=False,
+    rr_lookback=RR_LOOKBACK,
 ):
     """Extract (spectrogram, R-R features, label) triples for every usable beat in a record.
 
     R-R intervals run between consecutive beat annotations (BEAT_SYMBOLS, so F and Q beats count as
     neighbors even though they aren't extracted); a beat is usable only with a beat annotation on
-    each side. `rr_from_all_annotations=True` restores the pre-fix behavior (intervals between
+    each side. An interval spanning a ventricular flutter/fibrillation episode (EPISODE_SYMBOLS) is
+    invalid: the beats on either side of the episode aren't extracted, and local_mean_rr after it
+    averages only intervals since the episode, as at a record start (diagnosis.md, "Stage 2 item 1").
+    `rr_from_all_annotations=True` restores the pre-fix behavior (intervals between
     consecutive annotations of any kind, including "+", "~", ...), only to reproduce runs made
     before beat-only R-R (artifacts/diagnosis.md, "Stage 1").
 
     `max_normal=None` means no cap on normal beats. `augment=True` adds an R-peak-jitter
     duplicate of each beat (simulating R-peak detection error) in addition to the original.
+    `rr_lookback` is the number of intervals `local_mean_rr` averages (fewer near the record's start);
+    it changes only `local_mean_rr` and `rr_ratio`, never which beats are extracted.
     Also returns each beat's original annotation symbol (e.g. to split recall by V vs. S).
     """
     half_window = window_size // 2
@@ -163,9 +231,13 @@ def extract_beats_from_record(
     samples = np.asarray(samples)
     if rr_from_all_annotations:
         positions = np.arange(len(samples))
+        valid = np.ones(max(len(positions) - 1, 0), dtype=bool)
     else:
         positions = np.flatnonzero(beat_annotation_mask(symbols))
+        valid = valid_rr_mask(symbols, positions)
     rr_intervals = np.diff(samples[positions]) / fs
+    # history_start[k]: first interval of the run of valid intervals that contains interval k.
+    history_start = np.maximum.accumulate(np.where(valid, -1, np.arange(len(valid)))) + 1
     normal_count = 0
 
     spec_list, rr_list, y_list, record_id_list, symbol_list = [], [], [], [], []
@@ -176,6 +248,8 @@ def extract_beats_from_record(
         sym = symbols[i]
 
         if sym not in SYMBOL_MAP:
+            continue
+        if not (valid[j - 1] and valid[j]):
             continue
         if sample_idx - half_window < 0 or sample_idx + half_window >= len(filtered_signal):
             continue
@@ -196,7 +270,8 @@ def extract_beats_from_record(
 
             window = filtered_signal[adj_idx - half_window: adj_idx + half_window]
             norm_spec = compute_spectrogram(window, fs)
-            rr_features = compute_rr_timing_features(rr_intervals, j)
+            rr_features = compute_rr_timing_features(rr_intervals, j, lookback=rr_lookback,
+                                                     history_start=history_start[j - 1])
 
             spec_list.append(norm_spec)
             rr_list.append(rr_features)

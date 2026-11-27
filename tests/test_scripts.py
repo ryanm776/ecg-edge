@@ -226,7 +226,7 @@ def test_comparison_rows_use_each_models_own_val_sweep():
         assert row_["seed"] == 43
 
 
-def _fake_fit_env(val_loss):
+def _fake_fit_env(val_loss, history=None):
     from types import SimpleNamespace
 
     calls = {}
@@ -237,7 +237,7 @@ def _fake_fit_env(val_loss):
 
         def fit(self, **kw):
             calls["fit"] = kw
-            return SimpleNamespace(history={"val_loss": val_loss})
+            return SimpleNamespace(history=history or {"val_loss": val_loss})
 
     keras = SimpleNamespace(
         optimizers=SimpleNamespace(Adam=lambda learning_rate: ("adam", learning_rate)),
@@ -255,8 +255,47 @@ def test_fit_model_returns_best_epoch_with_early_stopping():
     assert best == 2
     assert calls["compile"]["loss"] == ("focal", 2.0, 0.25)
     (_, es), = calls["fit"]["callbacks"]
-    assert es == {"monitor": "val_loss", "patience": 12, "restore_best_weights": True}
+    assert es == {"monitor": "val_loss", "mode": "min", "patience": 12, "restore_best_weights": True}
     assert calls["fit"]["epochs"] == 100 and calls["fit"]["validation_data"] == ("xv", "yv")
+
+
+def test_fit_model_early_stops_on_a_given_monitor_loss(monkeypatch):
+    history = {"val_loss": [0.5, 0.3, 0.4], train.MONITOR_KEY: [0.9, 0.8, 0.7]}
+    model, tf, ecg_model, calls = _fake_fit_env(None, history)
+    monkeypatch.setattr(train, "val_loss_monitor", lambda tf, loss_fn, x, y, batch_size: ("monitor", loss_fn, x, y))
+
+    best = train.fit_model(model, tf, ecg_model, "x", "y", ("xv", "yv"), lr=0.001, epochs=100, batch_size=64,
+                           loss="weighted", monitor_loss="unweighted")
+
+    assert best == 3  # the monitor's best epoch, not val_loss's (2)
+    assert calls["compile"]["loss"] == "weighted"
+    monitor, (_, es) = calls["fit"]["callbacks"]  # the monitor logs its value before EarlyStopping reads it
+    assert monitor == ("monitor", "unweighted", "xv", "yv")
+    assert es == {"monitor": train.MONITOR_KEY, "mode": "min", "patience": 12, "restore_best_weights": True}
+
+
+def test_val_loss_monitor_reproduces_val_loss_for_the_training_loss():
+    import numpy as np
+    import tensorflow as tf
+
+    from ecg.model import categorical_focal_loss
+
+    rng = np.random.default_rng(0)
+    x, y = rng.normal(size=(200, 6)).astype(np.float32), rng.integers(0, 3, 200)
+    xv, yv = rng.normal(size=(90, 6)).astype(np.float32), rng.integers(0, 3, 90)
+    tf.keras.utils.set_random_seed(0)
+    model = tf.keras.Sequential([tf.keras.Input((6,)), tf.keras.layers.Dense(8, kernel_regularizer="l2"),
+                                 tf.keras.layers.Dense(3, activation="softmax", kernel_regularizer="l2")])
+    loss = categorical_focal_loss(gamma=2.0)
+    model.compile(optimizer="adam", loss=loss)
+
+    history = model.fit(x, y, validation_data=(xv, yv), epochs=3, batch_size=32, verbose=0,
+                        callbacks=[train.val_loss_monitor(tf, loss, xv, yv, 32)])
+
+    # val_loss includes the L2 penalty, and so does the monitor; History records the monitor too.
+    np.testing.assert_allclose(history.history[train.MONITOR_KEY], history.history["val_loss"], rtol=1e-5)
+    l2 = sum(float(r) for r in model.losses)
+    assert l2 > 100 * 1e-5 * history.history["val_loss"][-1]  # the penalty is far above the tolerance
 
 
 def test_fit_model_without_validation_trains_all_epochs():
@@ -295,3 +334,78 @@ def test_val_per_record_rows_reconcile_with_overall_val_metrics():
             alone, _ = evaluate.evaluate_predictions(y_val[mask], probs[mask], record_ids[mask], t)
             assert r["f1"] == alone["f1"]
             assert (r["fp"], r["fn"]) == (alone["confusion_matrix"][0][1], alone["confusion_matrix"][1][0])
+
+
+def test_comparison_rows_multiclass_se_pp_and_mixups_follow_predicted_classes():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from ecg import evaluate
+    from ecg.features import aami_class_metrics, sv_confusion
+
+    train = _load("train")
+    rng = np.random.default_rng(1)
+    symbols = np.array(["N"] * 60 + ["V"] * 25 + ["A"] * 15 + ["J"] * 5, dtype=object)
+    y_test = (symbols != "N").astype(int)
+    record_ids = np.array(["202", "100", "105"] * 35, dtype=object)
+    y_val = np.array([0] * 30 + [1] * 30)
+    preds, class_probs = {}, {}
+    for name in ("float", "int8"):
+        class_probs[name] = rng.dirichlet([1, 1, 1], size=len(y_test))
+        val_probs = rng.uniform(size=len(y_val))
+        _, sweep = evaluate.select_threshold(y_val, val_probs)
+        preds[name] = (val_probs, sweep, evaluate.abnormal_score(class_probs[name]))
+    args = SimpleNamespace(variant="bn_folded", calib_samples=100, target_recall=0.95, seed=42)
+
+    df = train.comparison_rows("bn_folded+nsv", args, y_val, y_test, record_ids, symbols, preds,
+                               threshold=0.6, float_threshold=0.45, tflite_kb=10.0, levels=200,
+                               evaluate=evaluate, class_probs=class_probs)
+
+    assert (df["variant"] == "bn_folded+nsv").all()
+    for _, row_ in df.iterrows():
+        pred_classes = evaluate.predicted_classes(class_probs[row_["model"]], row_["threshold"])
+        aami = aami_class_metrics(symbols, pred_classes=pred_classes)
+        assert (row_["se_V"], row_["pp_V"]) == aami["V"][1:]
+        assert (row_["se_S"], row_["pp_S"]) == aami["S"][1:]
+        assert (row_["S_as_V"], row_["V_as_S"]) == tuple(sv_confusion(symbols, pred_classes).values())
+        # N vs. abnormal columns stay on the abnormal score, so they reconcile with the class calls.
+        called_abnormal = pred_classes != "N"
+        assert row_["tp"] == int((called_abnormal & (y_test == 1)).sum())
+        assert row_["fp"] == int((called_abnormal & (y_test == 0)).sum())
+        assert row_["recall_ventricular"] == called_abnormal[symbols == "V"].mean()
+        # Every true V is called V, S or N: Se_V + V_as_S share + V misses add up to 1.
+        n_v = int((symbols == "V").sum())
+        v_missed = int(((symbols == "V") & ~called_abnormal).sum())
+        assert np.isclose(row_["se_V"] + (row_["V_as_S"] + v_missed) / n_v, 1.0)
+
+
+def test_comparison_rows_binary_has_no_mixup_counts():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from ecg import evaluate
+
+    train = _load("train")
+    rng = np.random.default_rng(2)
+    symbols = np.array(["N"] * 30 + ["V"] * 10 + ["A"] * 10, dtype=object)
+    y = (symbols != "N").astype(int)
+    _, sweep = evaluate.select_threshold(y, rng.uniform(size=len(y)))
+    probs = rng.uniform(size=len(y))
+    preds = {m: (probs, sweep, probs) for m in ("float", "int8")}
+    args = SimpleNamespace(variant="bn_folded", calib_samples=100, target_recall=0.95, seed=42)
+
+    df = train.comparison_rows("bn_folded", args, y, y, np.array(["100"] * len(y), dtype=object), symbols, preds,
+                               threshold=0.5, float_threshold=0.5, tflite_kb=10.0, levels=200, evaluate=evaluate)
+
+    assert df["S_as_V"].isna().all() and df["V_as_S"].isna().all()
+
+
+def test_fit_model_uses_a_given_loss():
+    model, tf, ecg_model, calls = _fake_fit_env([0.5, 0.4])
+    train = _load("train")
+
+    train.fit_model(model, tf, ecg_model, "x", "y", ("xv", "yv"), lr=0.001, epochs=5, batch_size=64, loss="custom")
+
+    assert calls["compile"]["loss"] == "custom"

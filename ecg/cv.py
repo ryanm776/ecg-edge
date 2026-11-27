@@ -21,11 +21,13 @@ def fold_masks(record_ids, folds):
 def pool_oof(scores_by_fold, held_out_masks):
     """Pool each fold's held-out scores into one array aligned with the masks' beats.
 
-    `scores_by_fold[k]` holds fold k's scores for its held-out beats, in beat order. Returns (oof, covered):
-    `oof` is NaN where no fold held the beat out, and `covered` marks the beats that have an OOF score.
+    `scores_by_fold[k]` holds fold k's scores for its held-out beats, in beat order: one score per beat, or one
+    row per beat (e.g. (n, 3) class probabilities). Returns (oof, covered): `oof` is NaN where no fold held the
+    beat out, and `covered` marks the beats that have an OOF score.
     """
     n = len(held_out_masks[0])
-    oof = np.full(n, np.nan)
+    first = np.asarray(scores_by_fold[0], dtype=float)
+    oof = np.full((n, *first.shape[1:]), np.nan)
     covered = np.zeros(n, dtype=bool)
     for scores, mask in zip(scores_by_fold, held_out_masks):
         scores = np.asarray(scores, dtype=float)

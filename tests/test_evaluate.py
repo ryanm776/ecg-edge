@@ -3,7 +3,9 @@ import pytest
 
 from ecg.evaluate import (
     _bind_inputs,
+    abnormal_score,
     evaluate_predictions,
+    predicted_classes,
     ranking_metrics,
     select_threshold,
     threshold_at_recall,
@@ -128,3 +130,28 @@ def test_threshold_at_recall_with_tied_quantized_probs():
 def test_ranking_metrics_perfect_separation():
     y_val, probs = _separated_classes(seed=4)
     assert ranking_metrics(y_val, probs) == {"pr_auc": 1.0, "roc_auc": 1.0}
+
+
+def test_predicted_classes_n_unless_above_threshold_then_most_probable_abnormal():
+    probs = np.array([
+        [0.80, 0.15, 0.05],  # abnormal 0.20 -> N
+        [0.50, 0.30, 0.20],  # abnormal 0.50, not > 0.5 -> N
+        [0.40, 0.45, 0.15],  # -> S
+        [0.30, 0.10, 0.60],  # -> V
+        [0.20, 0.40, 0.40],  # S/V tie -> S
+        [0.45, 0.05, 0.50],  # V wins although N > S
+    ])
+    pred = predicted_classes(probs, 0.5)
+    assert list(pred) == ["N", "N", "S", "V", "S", "V"]
+
+
+def test_predicted_classes_abnormal_split_matches_thresholded_abnormal_score():
+    probs = np.random.default_rng(0).dirichlet([1, 1, 1], size=500)
+    for t in (0.2, 0.5, 0.8):
+        pred = predicted_classes(probs, t)
+        np.testing.assert_array_equal(pred != "N", abnormal_score(probs) > t)
+
+
+def test_predicted_classes_rejects_binary_probabilities():
+    with pytest.raises(ValueError):
+        predicted_classes(np.array([0.2, 0.9]), 0.5)

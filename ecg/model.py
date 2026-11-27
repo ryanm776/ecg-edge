@@ -38,7 +38,7 @@ def build_multiscale_ptq_model(spec_shape):
     return tf.keras.models.Model(inputs=[spec_input, rr_input], outputs=output)
 
 
-def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
+def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras, n_classes=1):
     """Same layers/hyperparameters as build_multiscale_ptq_model, but each conv is
     Conv2D (linear) -> BatchNormalization -> ReLU6, with BN applied per branch *before*
     the concatenate. BN can then be folded into the conv weights at conversion, instead
@@ -49,6 +49,10 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
     ReLU6 is always a separate `ReLU(max_value=6)` layer, never `activation="relu6"`:
     tfmot's QuantizeAwareActivation rejects relu6 as a built-in layer activation. The
     converter still fuses it into the preceding CONV_2D / FULLY_CONNECTED op.
+
+    `n_classes=1` is the binary model (one sigmoid unit, P(abnormal)); `n_classes=3` gives a softmax
+    over N/S/V. Only the output layer depends on it, so the binary model's initial weights at a given
+    seed are the same as before the option existed.
     """
     layers = keras_mod.layers
 
@@ -77,18 +81,46 @@ def build_multiscale_bn_folded_model(spec_shape, keras_mod=tf.keras):
     combined = layers.concatenate([x, y])
     z = layers.ReLU(max_value=6.0)(layers.Dense(64, kernel_regularizer="l2")(combined))
     z = layers.Dropout(0.40)(z)
-    output = layers.Dense(1, activation="sigmoid", name="output")(z)
+    activation = "sigmoid" if n_classes == 1 else "softmax"
+    output = layers.Dense(n_classes, activation=activation, name="output")(z)
 
     return keras_mod.models.Model(inputs=[spec_input, rr_input], outputs=output)
 
 
 def focal_loss(gamma=2.0, alpha=0.25):
+    """Binary focal loss on a sigmoid output. `alpha` weights abnormal beats and 1 - alpha normal ones.
+    `alpha=None` is unweighted: weight 1 on both classes. (alpha=0.5 is not the same: it halves the
+    data loss against the fixed L2 penalty.)
+    """
     def loss(y_true, y_pred):
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
         bce = -(y_true * tf.math.log(y_pred) + (1.0 - y_true) * tf.math.log(1.0 - y_pred))
         p_t = y_true * y_pred + (1.0 - y_true) * (1.0 - y_pred)
         focal_factor = tf.pow(1.0 - p_t, gamma)
+        if alpha is None:
+            return tf.reduce_mean(focal_factor * bce)
         alpha_factor = y_true * alpha + (1.0 - y_true) * (1.0 - alpha)
         return tf.reduce_mean(alpha_factor * focal_factor * bce)
+    return loss
+
+
+def categorical_focal_loss(gamma=2.0, class_weights=None):
+    """Focal loss on a softmax output, with integer labels (one column of y_pred per class).
+
+    `class_weights[c]` weights beats whose true class is c; `None` is unweighted (weight 1 for every
+    class). The weights live in the loss rather than in Keras' `class_weight`, which doesn't apply to
+    `val_loss`, the quantity early stopping monitors. With two classes and weights (1 - alpha, alpha)
+    this equals `focal_loss(gamma, alpha)`.
+    """
+    weights = None if class_weights is None else tf.constant(class_weights, dtype=tf.float32)
+
+    def loss(y_true, y_pred):
+        y_true = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        p_t = tf.gather(y_pred, y_true, axis=1, batch_dims=1)
+        per_beat = tf.pow(1.0 - p_t, gamma) * -tf.math.log(p_t)
+        if weights is not None:
+            per_beat = tf.gather(weights, y_true) * per_beat
+        return tf.reduce_mean(per_beat)
     return loss

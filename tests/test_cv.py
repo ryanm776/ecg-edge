@@ -32,6 +32,18 @@ def test_pool_oof_takes_each_beat_from_the_fold_that_held_it_out():
         assert (oof[h] == scores[k]).all()
 
 
+def test_pool_oof_pools_rows_of_class_probabilities():
+    held = [m[1] for m in fold_masks(RECORD_IDS, FOLDS)]
+    probs = [np.random.default_rng(k).dirichlet([1, 1, 1], size=int(h.sum())) for k, h in enumerate(held)]
+
+    oof, covered = pool_oof(probs, held)
+
+    assert oof.shape == (len(RECORD_IDS), 3)
+    assert np.isnan(oof[~covered]).all()
+    for k, h in enumerate(held):
+        np.testing.assert_array_equal(oof[h], probs[k])
+
+
 def test_pool_oof_rejects_overlap_and_length_mismatch():
     a = np.array([True, True, False])
     b = np.array([False, True, True])

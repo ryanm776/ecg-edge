@@ -5,17 +5,24 @@ import pytest
 
 from ecg.features import (
     BEAT_SYMBOLS,
+    NSV_CLASSES,
+    RR_LOOKBACK,
     SYMBOL_MAP,
     aami_class,
     aami_class_metrics,
     apply_rr_normalizer,
+    balanced_class_weights,
     beat_annotation_mask,
     compute_rr_timing_features,
     compute_spectrogram,
     extract_beats_from_record,
     fit_rr_normalizer,
+    loss_scale,
+    nsv_labels,
     rr_quantile_ratio,
+    sv_confusion,
     type_recall,
+    valid_rr_mask,
 )
 
 
@@ -54,6 +61,50 @@ def test_aami_multiclass_se_and_pp_from_confusion_counts():
     assert m["S"] == (3, 2 / 3, 2 / 3)
     # V: 1 of 2 true V predicted V; 3 predicted V, 1 correct.
     assert m["V"] == (2, 1 / 2, 1 / 3)
+
+
+def test_nsv_labels_follow_aami_classes_and_agree_with_binary_labels():
+    symbols = np.array(list(SYMBOL_MAP), dtype=object)
+    labels = nsv_labels(symbols)
+
+    assert NSV_CLASSES == ("N", "S", "V")
+    for sym, label, cls in zip(symbols, labels, aami_class(symbols)):
+        assert NSV_CLASSES[label] == cls
+        assert (label > 0) == (SYMBOL_MAP[sym] == 1)
+
+
+def test_sv_confusion_counts_s_v_mixups_only():
+    #            true: N  N  N  S  S  S  V  V  V
+    symbols = np.array(["N", "R", "N", "A", "J", "A", "V", "E", "V"], dtype=object)
+    pred = np.array(["N", "S", "V", "S", "V", "V", "V", "S", "N"], dtype=object)
+
+    assert sv_confusion(symbols, pred) == {"S_as_V": 2, "V_as_S": 1}
+
+
+def test_nsv_labels_reject_symbols_outside_n_s_v():
+    with pytest.raises(ValueError, match="F"):
+        nsv_labels(np.array(["N", "F", "V"], dtype=object))
+
+
+def test_balanced_class_weights_equalize_class_totals_at_unit_mean():
+    labels = np.repeat([0, 1, 2], [11400, 555, 3179])  # fold 0's training view
+    counts = np.bincount(labels)
+
+    w = balanced_class_weights(labels)
+
+    totals = w * counts
+    # Each class carries the same total weight, i.e. w is proportional to 1 / frequency.
+    assert totals == pytest.approx(np.full(3, len(labels) / 3))
+    assert loss_scale(labels, w) == pytest.approx(1.0)
+    assert loss_scale(labels, None) == 1.0
+    # Matched weights on the same view: the frequency-weighted mean of N 0.75 / S 0.25 / V 0.25.
+    assert loss_scale(labels, (0.75, 0.25, 0.25)) == pytest.approx((0.75 * 11400 + 0.25 * (555 + 3179)) / len(labels))
+
+
+@pytest.mark.parametrize("labels", [[0, 0, 2, 2], [0, 1, 1, 3]])
+def test_balanced_class_weights_reject_a_missing_or_unknown_class(labels):
+    with pytest.raises(ValueError):
+        balanced_class_weights(np.array(labels))
 
 
 def test_aami_class_metrics_needs_exactly_one_prediction_kind():
@@ -172,6 +223,26 @@ def test_extract_beats_returns_symbols_aligned_with_labels_and_augmentation():
     assert len(record_ids) == len(syms)
 
 
+def test_augmentation_doubles_every_class_under_the_normal_cap():
+    # Balanced weights are computed on the augmented training view; this keeps them equal to the
+    # unaugmented view's.
+    fs = 360
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(30 * fs) / fs)
+    samples = np.arange(200, 30 * fs - 200, 300)
+    symbols = (["N", "N", "N", "V", "N", "A"] * len(samples))[:len(samples)]
+
+    def class_counts(augment):
+        *_, syms = extract_beats_from_record(signal, fs, samples, symbols, "r", max_normal=10, augment=augment,
+                                             rng=np.random.default_rng(0))
+        return np.bincount(nsv_labels(np.array(syms, dtype=object)), minlength=3)
+
+    plain, augmented = class_counts(False), class_counts(True)
+    assert plain[0] == 10 and plain[1] > 0 and plain[2] > 0  # the cap binds
+    np.testing.assert_array_equal(augmented, 2 * plain)
+    assert balanced_class_weights(np.repeat([0, 1, 2], augmented)) == pytest.approx(
+        balanced_class_weights(np.repeat([0, 1, 2], plain)))
+
+
 def _record_with_nonbeat_annotations():
     fs = 360
     signal = np.sin(2 * np.pi * 1.2 * np.arange(10 * fs) / fs)
@@ -209,3 +280,123 @@ def test_extract_beats_rr_from_all_annotations_reproduces_the_pre_fix_features()
     assert syms == [symbols[i] for i in kept_i]
     assert X_rr == [compute_rr_timing_features(rr_all, i) for i in kept_i]
     assert X_rr[3][0] == 100 / fs  # 1100's pre_rr ends at the "+" annotation
+
+
+def _record_with_a_premature_run():
+    """60 beats 300 samples apart, with a run of 12 premature A beats (200 apart) in the middle, so a
+    10-interval and a 30-interval window see different histories."""
+    fs = 360
+    gaps = [300] * 25 + [200] * 12 + [300] * 22
+    samples = np.concatenate([[200], 200 + np.cumsum(gaps)])
+    symbols = ["N"] * 26 + ["A"] * 12 + ["N"] * 22
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(samples[-1] + 400) / fs)
+    return signal, fs, samples, symbols
+
+
+def test_rr_lookback_changes_only_local_mean_and_ratio():
+    signal, fs, samples, symbols = _record_with_a_premature_run()
+    rr = np.diff(samples) / fs
+
+    def extract(**kw):
+        spec, X_rr, y, rec, syms = extract_beats_from_record(signal, fs, samples, symbols, "r", augment=True,
+                                                             rng=np.random.default_rng(0), **kw)
+        return np.array(spec), np.array(X_rr), y, rec, syms
+
+    default, ten, thirty = extract(), extract(rr_lookback=10), extract(rr_lookback=30)
+    assert RR_LOOKBACK == 10
+    for a, b in zip(default, ten):
+        np.testing.assert_array_equal(a, b)
+    # Same beats, labels, symbols and spectrograms whatever the lookback.
+    np.testing.assert_array_equal(thirty[0], ten[0])
+    assert thirty[2:] == ten[2:]
+    # pre_rr, post_rr and pre_post_ratio are unchanged; local_mean_rr and rr_ratio follow the 30-interval window.
+    np.testing.assert_array_equal(thirty[1][:, [0, 1, 4]], ten[1][:, [0, 1, 4]])
+    beat_j = np.repeat(np.arange(1, len(samples) - 1), 2)  # every beat is extracted, each with its jitter duplicate
+    np.testing.assert_array_equal(thirty[1], [compute_rr_timing_features(rr, j, lookback=30) for j in beat_j])
+    np.testing.assert_allclose(thirty[1][:, 3], thirty[1][:, 0] / thirty[1][:, 2])
+    # Late in the run the 10-interval window is all premature intervals, the 30-interval one isn't.
+    last_a = 2 * (37 - 1)  # row of the last A beat (beat index 37)
+    assert symbols[37] == "A" and ten[1][last_a, 3] == pytest.approx(1.0)
+    assert thirty[1][last_a, 3] < 0.85
+
+
+def test_rr_lookback_window_is_truncated_at_the_record_start():
+    signal, fs, samples, symbols = _record_with_a_premature_run()
+    rr = np.diff(samples) / fs
+
+    _, X_rr, *_ = extract_beats_from_record(signal, fs, samples, symbols, "r", rr_lookback=30)
+
+    # Beat j averages the j intervals before it while j < 30.
+    for j in (1, 5, 29, 30, 31):
+        assert X_rr[j - 1][2] == pytest.approx(np.mean(rr[max(0, j - 30):j]))
+
+
+def _record_with_a_flutter_episode():
+    """15 N beats 300 samples apart, a flutter episode ("[", rhythm "+", nine "!" waves, "]"), then 15 N
+    beats 250 apart with one 1000-sample pause (a real pause: no annotation inside it)."""
+    fs = 360
+    before = list(200 + 300 * np.arange(15))  # last beat 4400
+    episode = [4500, 4510] + list(range(4600, 5500, 100)) + [5500]
+    after = list(np.concatenate([[5800], 5800 + np.cumsum([250] * 6 + [1000] + [250] * 7)]))
+    samples = np.array(before + episode + after)
+    symbols = ["N"] * 15 + ["[", "+"] + ["!"] * 9 + ["]"] + ["N"] * 15
+    signal = np.sin(2 * np.pi * 1.2 * np.arange(samples[-1] + 400) / fs)
+    return signal, fs, samples, symbols
+
+
+def test_valid_rr_mask_rejects_intervals_with_any_episode_annotation_between_the_beats():
+    symbols = ["N", "N", "[", "!", "]", "N", "!", "N", "+", "~", "N"]
+    beats = [0, 1, 5, 7, 10]
+    # 1->5 holds "[ ! ]"; 5->7 holds a lone "!" (an episode cut by the record edge); 7->10 holds only "+ ~".
+    np.testing.assert_array_equal(valid_rr_mask(symbols, beats), [True, False, False, True])
+
+
+@pytest.mark.parametrize("lookback", [3, 10])
+def test_flutter_episode_splits_the_record_like_two_separate_records(lookback):
+    signal, fs, samples, symbols = _record_with_a_flutter_episode()
+    rng = lambda: np.random.default_rng(0)  # noqa: E731
+    full = extract_beats_from_record(signal, fs, samples, symbols, "r", augment=True, rng=rng(),
+                                     rr_lookback=lookback)
+
+    # Each side of the episode, extracted as its own record (beat annotations only), in order.
+    before = extract_beats_from_record(signal, fs, samples[:15], symbols[:15], "r", augment=True, rng=rng(),
+                                       rr_lookback=lookback)
+    rng_after = rng()
+    rng_after.integers(-8, 9, size=len(before[0]) // 2)  # the full record's draws for the beats before
+    after = extract_beats_from_record(signal, fs, samples[-15:], symbols[-15:], "r", augment=True,
+                                      rng=rng_after, rr_lookback=lookback)
+
+    np.testing.assert_array_equal(np.array(full[0]), np.array(before[0] + after[0]))
+    np.testing.assert_array_equal(np.array(full[1]), np.array(before[1] + after[1]))
+    assert full[2:] == tuple(a + b for a, b in zip(before[2:], after[2:]))
+
+
+def test_flutter_episode_drops_the_boundary_beats_and_restarts_the_r_r_history():
+    signal, fs, samples, symbols = _record_with_a_flutter_episode()
+    beats = np.flatnonzero(beat_annotation_mask(symbols))
+
+    _, X_rr, _, _, syms = extract_beats_from_record(signal, fs, samples, symbols, "r")
+    X_rr = np.array(X_rr)
+
+    # 30 beats: the two record ends and the two beats beside the episode (4400, 5800) aren't extracted.
+    assert len(beats) == 30 and len(syms) == 30 - 2 - 2
+    spanning = (5800 - 4400) / fs
+    assert not np.isclose(X_rr[:, :2], spanning).any()
+    # The first beat after the episode that is extracted (6050) averages only the one interval since it.
+    first_after = 13  # 13 beats (1..13) extracted before the episode
+    assert X_rr[first_after, 0] == pytest.approx(250 / fs)
+    assert X_rr[first_after, 2] == pytest.approx(250 / fs)
+    assert X_rr[first_after, 3] == pytest.approx(1.0)
+    # The 1000-sample pause has no annotation inside it, so it is a valid R-R interval and is kept.
+    assert np.isclose(X_rr[:, 0], 1000 / fs).sum() == 1
+    assert np.isclose(X_rr[:, 1], 1000 / fs).sum() == 1
+
+
+def test_records_without_episodes_are_unchanged():
+    for make in (_record_with_nonbeat_annotations, _record_with_a_premature_run):
+        signal, fs, samples, symbols = make()
+        beats = [i for i, s in enumerate(symbols) if s in BEAT_SYMBOLS]
+        rr = np.diff(samples[beats]) / fs
+        _, X_rr, *_ = extract_beats_from_record(signal, fs, samples, symbols, "r")
+        kept_j = [j for j in range(1, len(beats) - 1) if symbols[beats[j]] in SYMBOL_MAP]
+        assert X_rr == [compute_rr_timing_features(rr, j) for j in kept_j]
