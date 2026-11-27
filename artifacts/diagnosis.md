@@ -1,6 +1,6 @@
 # ECG classifier: investigation and experiment log
 
-> **Current status:** Stage 2 is in progress. The latest results are in the last section, "Stage 2 step 3a results: 30-interval R-R lookback": no gain, so nsv_matched (N/S/V, weights N 0.75 / S 0.25 / V 0.25, 10-interval lookback) still carries forward, and step 3b (`--normalize-rr`) builds on it. Step 3 was designed before any step 3 run, in "Step 3 design" at the end of "Stage 2 step 2b results". The remaining steps are in "Stage 2 plan". No model has been exported to firmware since the old-split baseline.
+> **Current status:** Stage 2 is in progress. The configuration carried forward is nsv_matched (N/S/V, weights N 0.75 / S 0.25 / V 0.25, 10-interval lookback) with `--normalize-rr`, on features with the record 207 fix (`stage2/item1_207_fix`). Items 2 and 3 of "Remaining Stage 2 plan" were dropped before any run (last section), so item 4 (global average pooling instead of Flatten) is next, with item1 as its reference. No model has been exported to firmware since the old-split baseline.
 
 ## Contents
 
@@ -17,6 +17,11 @@ Investigations in the order they were run, each with its outcome:
 - **Stage 2 step 2a results: binary vs. N/S/V:** no structural multiclass benefit; N/S/V matched shows no loss against binary and carries forward for AAMI comparability and a separate S weight.
 - **Stage 2 step 2b results: balanced class weights:** no weighting wins on S PR-AUC. Balanced weights fail the V guard and mainly shift scores up rather than ranking S better. nsv_matched carries forward; step 3 is designed with 5 seeds.
 - **Stage 2 step 3a results: 30-interval R-R lookback:** no gain beyond the seed spread on any decision metric (S PR-AUC −0.002, 5 seeds). Record 209, the motivating case, ranks S worse. 3b builds on nsv_matched.
+- **Stage 2 step 3b results: R-R standardization:** `--normalize-rr` wins (INT8 OOF S PR-AUC 0.146 → 0.230, gain 0.084 against a spread of 0.043; the V guard holds). The review found record 207's R-R intervals spanning its flutter episodes.
+- **Remaining Stage 2 plan:** a fixed list of six items, declared before any further run.
+- **Stage 2 item 1: record 207 flutter-episode R-R fix:** an interval with a `[`, `]` or `!` annotation between its beats is invalid, as in WFDB `bxb`. Only 207 changes.
+- **Stage 2 item 1 results:** the sanity rerun passes (S PR-AUC 0.230 → 0.284, V PR-AUC 0.933 → 0.931, both within the spread). It is the reference for the next item.
+- **Stage 2 items 2 and 3: dropped before any run:** the patient-relative R-R feature isn't workable as specified, and robust scaling lost its motivation with item 1. Item 4 is next.
 
 > **Old split.** "Float → INT8 gap" and "Validation/test mismatch" use the old hand-picked train/val/test split, as does every committed file directly under `artifacts/` (model, `metrics.json`, `variant_comparison.*`, …). Everything from "de Chazal split results" on uses the de Chazal split; those results are in `artifacts/dechazal/` (see README.md, "Data split").
 
@@ -564,8 +569,8 @@ Fixes are ordered from most fundamental to least: input correctness → objectiv
 - more training data from other PhysioNet databases (below)
 - the training normal-beat cap: cap vs. no cap, and random vs. first-N sampling under the cap (below)
 - nested validation, the fix for early stopping on the held-out fold (below)
-- patient-relative R-R features (relative to each patient's recent rhythm): untested. Now item 2 of "Remaining Stage 2 plan", in a causal form only.
-- robust scaling of the R-R features (median/IQR instead of mean/std): untested. Now item 3 of "Remaining Stage 2 plan", run only if still relevant.
+- patient-relative R-R features (relative to each patient's recent rhythm): was item 2 of "Remaining Stage 2 plan"; dropped before any run (see "Stage 2 items 2 and 3: dropped before any run").
+- robust scaling of the R-R features (median/IQR instead of mean/std): was item 3 of "Remaining Stage 2 plan"; no longer relevant after item 1, so skipped (same section).
 
 **Known limitation: early stopping on the held-out fold.** This affects every OOF result, Stage 2 included.
 - In grouped CV (`train_cv.py`), each fold model early-stops on its held-out fold, with best weights restored. Those same held-out beats become its OOF predictions.
@@ -1138,9 +1143,11 @@ Fixed on 2026-11-02, after the step 3b results and before any further run. This 
    - A defined warm-up at the start of each record.
    - Compared with item 1's rerun.
    - Overlap to resolve in its design, before any run: `local_mean_rr` and `rr_ratio` are already a causal, 10-beat patient-relative feature. The design must state what item 2 adds beyond them.
+   - **Dropped before any run (2026-11-26):** see "Stage 2 items 2 and 3: dropped before any run".
 3. **Robust scaling (median/IQR instead of mean/std).**
    - Only if still relevant after items 1 and 2. Before running it, record why it is or isn't.
    - Its original motivation was the outlier-inflated `pre_rr` std, which item 1 removes.
+   - **Skipped: no longer relevant after item 1 (2026-11-26).** Same section.
 4. **Global average pooling instead of Flatten.**
    - Flatten → Dense(64) holds 197,184 of the ~202.2k parameters.
    - Model size and the 16 KB tensor arena are reported alongside.
@@ -1245,7 +1252,7 @@ Fixed on 2026-11-02, after the step 3b results and before any further run. This 
 - None of the changes exceeds the spread, so by the decision rule nothing here counts as a gain. Paired by seed, S PR-AUC is higher in 4 of 5 seeds and lower in seed 45 (0.288 → 0.201).
 - S ROC-AUC spread falls from 0.042 to 0.008, mostly from seed 44 (0.777 → 0.892).
 - The float rows give the same verdicts. INT8 − float: the largest per-seed gap of any decision metric is 0.003 (S PR-AUC). No quantization gap.
-- **item1 (`stage2/item1_207_fix`) is the reference for item 2.**
+- **item1 (`stage2/item1_207_fix`) is the reference for the next item.** Items 2 and 3 were later dropped before any run, so that is item 4.
 
 **Descriptive (never decisive):**
 - **Per-record S vs. own-N ROC-AUC, item1 against rr_norm:**
@@ -1278,3 +1285,51 @@ Fixed on 2026-11-02, after the step 3b results and before any further run. This 
 - DS2 S beats called V: item1 239.4 ± 160.1, rr_norm 321.2 ± 269.8.
 - Final epochs: item1 18 / 17 / 9 / 18 / 16, rr_norm 18 / 19 / 20 / 14 / 16.
 - The unresolved final-model procedure applies. Seed 44's final model trains for 9 epochs and gets DS2 Se_S 0.080 at threshold 0.65 (FN 1,585, FP 328). DS2 Se_S ranges 0.080–0.657 across seeds.
+
+## Stage 2 items 2 and 3: dropped before any run
+
+Neither item was run. Both are dropped from "Remaining Stage 2 plan". The fixed list allows dropping an item before it runs; what it forbids is adding one after seeing a result, and nothing is added here. **item1 (`stage2/item1_207_fix`) stays the reference, now for item 4.**
+
+### Item 2: causal patient-relative R-R features
+
+**Candidates considered.** Each was framed by what `local_mean_rr` (a plain mean of the last 10 intervals, `pre_rr` included) and `rr_ratio` get wrong:
+- **A. Gated reference:** a running mean of only the intervals within 92–116% of the running average, as in Pan-Tompkins' RR AVERAGE2. It targets premature beats pulling the reference down.
+- **B. Prematurity scaled by the patient's own variability:** z = (`pre_rr` − running median) / max(running MAD, 20 ms), over the 10 valid intervals before `pre_rr`, as a 6th R-R feature. It targets normal beats in AF looking premature.
+- **C. Long-horizon baseline:** `pre_rr` over an exponential moving average with a time constant of minutes.
+
+**A and C are dropped on existing evidence.** Both address a short or contaminated reference, and fixes for that have failed twice: the median ratio in Stage 1 (step 2), and the 30-interval lookback in step 3a, which ranked 209's S beats worse. C is the closest to 3a.
+
+**B was the recommended candidate, and a review of the design found it unworkable as specified.**
+- **How the review worked:** two independent prototypes of the feature, run on the real records. One reproduces `build_dataset`'s beats and 5 base features exactly (DS1 50,544 rows, DS2 49,273).
+- **What it used:** no model was trained and no classifier or AUC computed. The review used DS1 labels for per-class feature summaries, and DS2 for R-R mechanics only, with no class labels.
+
+**Findings on option B:**
+- **The warm-up is undefined.** The first extractable beat of a record has no interval before `pre_rr`.
+  - That is 27 beats in DS1: one per record, plus 207's first beat after each of its 5 episode resets. DS2 has 22.
+  - Left as NaN, they make the `--normalize-rr` mean and std NaN, so the column is NaN for every training row. The `std < 1e-12` guard doesn't catch NaN.
+  - With one interval of history the MAD is 0, so the floor applies and z is extreme. There are 26 such beats in DS1, with |z| up to 39.3 (207, L beat at 264.5 s), against steady-state normal beats at about ±3.
+- **The 20 ms floor applies to most S beats, and there z repeats existing inputs.**
+  - The floor applies (MAD < 20 ms) to 52.1% of DS1 beats: N 55.1%, S 61.3%, V 13.7%. The median MAD is 19.4 ms. In regular-rhythm records it applies to 96.6–99.6% of beats (112, 116, 122, 205).
+  - Where it applies, z × 0.02 s has Pearson 0.985 with `pre_rr − local_mean_rr`, an exact function of two existing inputs. Spearman(z, `rr_ratio`) is 0.957 there and 0.918 over all of DS1.
+  - A lower floor doesn't help: the median MAD in those records is 6.9–9.7 ms, so z would blow up instead.
+- **Heavy tails with no clip defined.**
+  - In the training view, z's excess kurtosis is 30.9, against 0.2–6.4 for the other five features. Its normalized max is 22.8, against at most 15.5.
+  - On DS2 (mechanics only), 232's sinus pauses give a normalized z of 70.2.
+  - A clip value chosen after a run would be tuning.
+- **Not a single change.** The R-R input tensor has one INT8 scale. Adding z widens its range in 93% of 500 simulated 100-row calibration draws, which makes the other five features' quantization 1.28× coarser (median; 1.66× at q90). The width of 5 is also fixed in `ecg/model.py`, `evaluate._bind_inputs` and the firmware sketch.
+- **Its one confirmed strength is on the FP side in AF.** Among normal beats in 201 and 203's AF rhythm (n = 3,416), 4.7% are at or below the median S value on z, against 22.4% on `rr_ratio`. Making that usable would need a warm-up rule, a clip, a floor decision and separate R-R quantization, all fixed before a run. That is a lot of new design for a feature that, on most S beats, only repeats existing inputs.
+
+**Decision: item 2 is dropped.** AF/flutter normal-beat false positives remain a known limitation and are rechecked in item 5.
+
+### Item 3: robust scaling (median/IQR instead of mean/std)
+
+"Remaining Stage 2 plan" makes item 3 conditional: before running it, record why it is or isn't still relevant.
+
+**It is no longer relevant.**
+- Its stated motivation was the outlier-inflated `pre_rr` std, and item 1 removed that cause.
+  - The final model's `pre_rr` std went from 0.794 to 0.226.
+  - The seed-42 fold models are now 0.216–0.234. Fold 1, which never trained on 207, was already 0.232 before the fix.
+- The long intervals that remain are real rhythm, not a feature bug: 232's pauses of up to 5.9 s on DS2, and the intervals of 2.6–3.7 s in 201 and 219.
+- Robust scaling changes the divisor, not the shape of the distribution: a 5.9 s pause stays an outlier under either scaling. What bounds such values is clipping, and that is already a firmware requirement ("Stage 2 item 1", "Deployment requirements").
+
+**Decision: item 3 is skipped.** The next item to run is item 4 (global average pooling instead of Flatten), with `stage2/item1_207_fix` as its reference.
